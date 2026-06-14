@@ -1,4 +1,7 @@
+import { useState } from 'react'
 import { useWallet } from '../context/WalletContext'
+import WalletSelectModal from './WalletSelectModal'
+import WalletInfoModal from './WalletInfoModal'
 import '../styles/WalletButton.css'
 
 function truncate(addr) {
@@ -6,7 +9,9 @@ function truncate(addr) {
 }
 
 export default function WalletButton() {
-  const { address, connecting, isCorrectNetwork, connect, disconnect, switchToBaseSepolia } = useWallet()
+  const { address, isCorrectNetwork, switchToBaseSepolia } = useWallet()
+  const [showSelect, setShowSelect] = useState(false)
+  const [showInfo,   setShowInfo]   = useState(false)
 
   if (address && !isCorrectNetwork) {
     return (
@@ -18,17 +23,32 @@ export default function WalletButton() {
 
   if (address) {
     return (
-      <div className="wallet-connected">
-        <span className="wallet-indicator" />
-        <span className="wallet-address">{truncate(address)}</span>
-        <button className="wallet-disconnect" onClick={disconnect} aria-label="Disconnect wallet">✕</button>
-      </div>
+      <>
+        <button className="wallet-connected" onClick={() => setShowInfo(true)}>
+          <span className="wallet-indicator" />
+          <span className="wallet-address">{truncate(address)}</span>
+          <span className="wallet-chevron">▾</span>
+        </button>
+
+        {showInfo && (
+          <WalletInfoModal
+            onClose={() => setShowInfo(false)}
+            onSwitchWallet={() => setShowSelect(true)}
+          />
+        )}
+      </>
     )
   }
 
   return (
-    <button className="wallet-btn wallet-btn--connect" onClick={connect} disabled={connecting}>
-      {connecting ? 'Connecting…' : 'Connect Wallet'}
-    </button>
+    <>
+      <button className="wallet-btn wallet-btn--connect" onClick={() => setShowSelect(true)}>
+        Connect Wallet
+      </button>
+
+      {showSelect && (
+        <WalletSelectModal onClose={() => setShowSelect(false)} />
+      )}
+    </>
   )
 }

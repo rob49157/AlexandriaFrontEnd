@@ -4,45 +4,78 @@ const WalletContext = createContext(null)
 
 const BASE_SEPOLIA_CHAIN_ID = 84532
 
+function resolveProvider(type) {
+  const eth = window.ethereum
+  if (!eth) return null
+
+  // Some browsers expose multiple injected wallets under window.ethereum.providers
+  const providers = eth.providers ?? [eth]
+
+  if (type === 'metamask') {
+    // Exclude wallets that spoof isMetaMask (Rabby, Brave, etc.)
+    return providers.find(p => p.isMetaMask && !p.isRabby && !p.isBraveWallet && !p.isCoinbaseWallet && !p.isFrame) ?? null
+  }
+  if (type === 'rabby') {
+    return providers.find(p => p.isRabby) ?? (eth.isRabby ? eth : null)
+  }
+  if (type === 'coinbase') {
+    return (
+      window.coinbaseWalletExtension ??
+      providers.find(p => p.isCoinbaseWallet) ??
+      null
+    )
+  }
+  // injected — whatever is available
+  return eth
+}
+
 export function WalletProvider({ children }) {
-  const [address, setAddress] = useState(null)
-  const [provider, setProvider] = useState(null)
-  const [signer, setSigner] = useState(null)
-  const [chainId, setChainId] = useState(null)
+  const [address,    setAddress]    = useState(null)
+  const [provider,   setProvider]   = useState(null)
+  const [signer,     setSigner]     = useState(null)
+  const [chainId,    setChainId]    = useState(null)
+  const [walletType, setWalletType] = useState(null)
   const [connecting, setConnecting] = useState(false)
-  const [error, setError] = useState(null)
+  const [error,      setError]      = useState(null)
 
   const isCorrectNetwork = chainId === BASE_SEPOLIA_CHAIN_ID
 
-  const connect = useCallback(async () => {
-    if (!window.ethereum) {
-      setError('Please install MetaMask to use Alexandria')
-      return
+  const connectWith = useCallback(async (type) => {
+    const raw = resolveProvider(type)
+    if (!raw) {
+      setError('Wallet not found. Please install it and try again.')
+      return false
     }
     setConnecting(true)
     setError(null)
     try {
       const { BrowserProvider } = await import('ethers')
-      const prov = new BrowserProvider(window.ethereum)
+      const prov     = new BrowserProvider(raw)
       const accounts = await prov.send('eth_requestAccounts', [])
-      const sign = await prov.getSigner()
-      const network = await prov.getNetwork()
+      const sign     = await prov.getSigner()
+      const network  = await prov.getNetwork()
       setProvider(prov)
       setSigner(sign)
       setAddress(accounts[0])
       setChainId(Number(network.chainId))
+      setWalletType(type)
+      return true
     } catch (err) {
       setError(err.message)
+      return false
     } finally {
       setConnecting(false)
     }
   }, [])
+
+  const connect = useCallback(() => connectWith('injected'), [connectWith])
 
   const disconnect = useCallback(() => {
     setAddress(null)
     setProvider(null)
     setSigner(null)
     setChainId(null)
+    setWalletType(null)
     setError(null)
   }, [])
 
@@ -88,9 +121,9 @@ export function WalletProvider({ children }) {
 
   return (
     <WalletContext.Provider value={{
-      address, provider, signer, chainId,
+      address, provider, signer, chainId, walletType,
       connecting, error, isCorrectNetwork,
-      connect, disconnect, switchToBaseSepolia,
+      connect, connectWith, disconnect, switchToBaseSepolia,
     }}>
       {children}
     </WalletContext.Provider>
