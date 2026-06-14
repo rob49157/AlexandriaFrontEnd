@@ -1,0 +1,338 @@
+/* ── Overlay ── */
+.wmodal__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  animation: wmodal-fade-in 0.15s ease;
+}
+
+@keyframes wmodal-fade-in {
+  from { opacity: 0 }
+  to   { opacity: 1 }
+}
+
+/* ── Card ── */
+.wmodal__card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.75rem;
+  width: 100%;
+  max-width: 420px;
+  animation: wmodal-slide-up 0.18s ease;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+}
+
+@keyframes wmodal-slide-up {
+  from { transform: translateY(10px); opacity: 0 }
+  to   { transform: translateY(0);    opacity: 1 }
+}
+
+/* ── Header ── */
+.wmodal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.375rem;
+}
+
+.wmodal__title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-display);
+}
+
+.wmodal__close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  padding: 0.25rem;
+  line-height: 1;
+  transition: color var(--transition);
+}
+
+.wmodal__close:hover {
+  color: var(--text-secondary);
+}
+
+/* ── Subtitle ── */
+.wmodal__subtitle {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  margin-bottom: 1.5rem;
+}
+
+/* ── Wallet list ── */
+.wmodal__wallet-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.wmodal__wallet-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.875rem 1rem;
+  text-align: left;
+  transition: all var(--transition);
+}
+
+button.wmodal__wallet-item:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+button.wmodal__wallet-item:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.wmodal__wallet-item--unavailable {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.wmodal__wallet-item--loading {
+  border-color: var(--border-accent);
+}
+
+.wmodal__wallet-icon {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+}
+
+.wmodal__wallet-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.wmodal__wallet-name {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.wmodal__wallet-desc {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+.wmodal__wallet-right {
+  flex-shrink: 0;
+  font-size: 0.8125rem;
+}
+
+.wmodal__detected {
+  color: #4caf7a;
+  font-weight: 500;
+}
+
+.wmodal__not-detected {
+  color: var(--text-muted);
+}
+
+.wmodal__install-link {
+  color: var(--accent);
+  font-weight: 500;
+  transition: color var(--transition);
+}
+
+.wmodal__install-link:hover {
+  color: var(--accent-hover);
+}
+
+/* ── Spinner ── */
+.wmodal__spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(201, 168, 76, 0.3);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: wmodal-spin 0.7s linear infinite;
+}
+
+@keyframes wmodal-spin {
+  to { transform: rotate(360deg) }
+}
+
+/* ── Error ── */
+.wmodal__error {
+  margin-top: 1rem;
+  padding: 0.625rem 0.875rem;
+  background: rgba(224, 96, 96, 0.1);
+  border: 1px solid rgba(224, 96, 96, 0.25);
+  border-radius: var(--radius-sm);
+  color: #e06060;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+/* ══════════════════════════════════════════
+   Info modal (connected wallet details)
+══════════════════════════════════════════ */
+.wmodal__card--info {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.wmodal__wallet-type-label {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  margin-bottom: 1rem;
+}
+
+/* Full address row */
+.wmodal__address-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.875rem;
+}
+
+.wmodal__full-address {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 0.775rem;
+  color: var(--text-primary);
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+.wmodal__copy-btn {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  padding: 0.3rem 0.625rem;
+  transition: all var(--transition);
+  white-space: nowrap;
+}
+
+.wmodal__copy-btn:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  color: var(--text-primary);
+}
+
+/* Network row */
+.wmodal__network-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.875rem;
+}
+
+.wmodal__network-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4caf7a;
+  flex-shrink: 0;
+}
+
+.wmodal__network-dot--wrong {
+  background: #e06060;
+}
+
+.wmodal__network-label {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.wmodal__network-label--wrong {
+  color: #e06060;
+}
+
+.wmodal__switch-network-btn {
+  background: none;
+  border: 1px solid rgba(224, 96, 96, 0.4);
+  border-radius: var(--radius-sm);
+  color: #e06060;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.5rem;
+  margin-left: 0.25rem;
+  transition: all var(--transition);
+}
+
+.wmodal__switch-network-btn:hover {
+  background: rgba(224, 96, 96, 0.08);
+}
+
+/* Basescan link */
+.wmodal__basescan-link {
+  font-size: 0.8125rem;
+  color: var(--accent);
+  margin-bottom: 1.5rem;
+  transition: color var(--transition);
+}
+
+.wmodal__basescan-link:hover {
+  color: var(--accent-hover);
+}
+
+/* Info action buttons */
+.wmodal__info-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: auto;
+}
+
+.wmodal__switch-wallet-btn {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  font-weight: 500;
+  padding: 0.625rem 1rem;
+  transition: all var(--transition);
+}
+
+.wmodal__switch-wallet-btn:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  color: var(--text-primary);
+}
+
+.wmodal__disconnect-btn {
+  flex: 1;
+  background: rgba(224, 96, 96, 0.08);
+  border: 1px solid rgba(224, 96, 96, 0.25);
+  border-radius: var(--radius-md);
+  color: #e06060;
+  font-size: 0.875rem;
+  font-weight: 500;
+  padding: 0.625rem 1rem;
+  transition: all var(--transition);
+}
+
+.wmodal__disconnect-btn:hover {
+  background: rgba(224, 96, 96, 0.14);
+  border-color: rgba(224, 96, 96, 0.4);
+}
