@@ -1,6 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
+import { ethers } from 'ethers'
 import { useWallet } from '../context/WalletContext'
+import { useContracts } from '../hooks/useContracts'
 import '../styles/Dashboard.css'
 
 const CATEGORY_STYLE = {
@@ -73,12 +75,74 @@ function truncate(addr) {
 
 export default function LibrarianDashboard() {
   const { address, connect } = useWallet()
+  const { tokenContract, stakeContract } = useContracts()
 
   const [hidden,          setHidden]          = useState(new Set())
   const [challengeOpen,   setChallengeOpen]   = useState(null)
   const [reason,          setReason]          = useState('')
   const [challengeStates, setChallengeStates] = useState({}) // { hash: 'pending' | 'done' }
   const [claimState,      setClaimState]      = useState('idle') // idle | pending | done
+
+  // Staking state
+  const [isLibrarian, setIsLibrarian] = useState(false)
+  const [stakedAmount, setStakedAmount] = useState('0')
+  const [stakeInput, setStakeInput] = useState('50') // Min 50 ALEX
+  const [stakeLoading, setStakeLoading] = useState(false)
+
+  useEffect(() => {
+    async function checkLibrarianStatus() {
+      if (!address || !stakeContract) return
+      try {
+        const info = await stakeContract.librarians(address)
+        setIsLibrarian(info.active)
+        if (info.active) {
+          setStakedAmount(ethers.formatUnits(info.amount, 18))
+        }
+      } catch (err) {
+        console.error("Error fetching librarian status", err)
+      }
+    }
+    checkLibrarianStatus()
+  }, [address, stakeContract])
+
+  const handleStake = async () => {
+    if (!stakeInput || isNaN(stakeInput)) return
+    setStakeLoading(true)
+    try {
+      const amount = ethers.parseUnits(stakeInput, 18)
+      
+      // 1. Approve
+      const approveTx = await tokenContract.approve(stakeContract.target, amount)
+      await approveTx.wait()
+      
+      // 2. Stake
+      const stakeTx = await stakeContract.stakeAsLibrarian(amount)
+      await stakeTx.wait()
+      
+      setIsLibrarian(true)
+      setStakedAmount(stakeInput)
+    } catch (err) {
+      console.error("Staking failed", err)
+      alert("Staking failed. See console.")
+    } finally {
+      setStakeLoading(false)
+    }
+  }
+
+  const handleUnstake = async () => {
+    setStakeLoading(true)
+    try {
+      const tx = await stakeContract.unstakeAsLibrarian()
+      await tx.wait()
+      setIsLibrarian(false)
+      setStakedAmount('0')
+    } catch (err) {
+      console.error("Unstaking failed", err)
+      alert("Unstaking failed. Note there is a 30-day cooldown.")
+    } finally {
+      setStakeLoading(false)
+    }
+  }
 
   const queue = MOCK_QUEUE
     .filter(b => !hidden.has(b.arweaveHash) && challengeStates[b.arweaveHash] !== 'done')
@@ -126,6 +190,27 @@ export default function LibrarianDashboard() {
             <p>Connect your wallet to view your librarian dashboard.</p>
             <button className="dash__connect-btn" onClick={connect}>Connect Wallet</button>
           </div>
+        ) : !isLibrarian ? (
+          <div className="dash__connect">
+            <h2>Become a Librarian</h2>
+            <p>Stake a minimum of 50 $ALEX to join the librarian network. You will be responsible for reviewing uploads and resolving challenges.</p>
+            <div style={{ marginTop: '20px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
+              <input 
+                type="number" 
+                value={stakeInput} 
+                onChange={e => setStakeInput(e.target.value)} 
+                min="50"
+                style={{ padding: '10px', width: '200px', borderRadius: '8px', border: '1px solid var(--border)' }}
+              />
+              <button 
+                className="dash__connect-btn" 
+                onClick={handleStake}
+                disabled={stakeLoading}
+              >
+                {stakeLoading ? 'Staking...' : 'Approve & Stake'}
+              </button>
+            </div>
+          </div>
         ) : (
           <>
             <div className="dash__stats">
@@ -139,6 +224,17 @@ export default function LibrarianDashboard() {
                   <span className="dash__stat-label">{label}</span>
                 </div>
               ))}
+              <div className="dash__stat">
+                <span className="dash__stat-value">{stakedAmount} $ALEX</span>
+                <span className="dash__stat-label">Active Stake</span>
+                <button 
+                  onClick={handleUnstake} 
+                  disabled={stakeLoading}
+                  style={{ marginTop: '10px', background: 'transparent', color: 'var(--accent)', border: '1px solid var(--accent)', padding: '4px 8px', borderRadius: '4px', cursor: 'pointer' }}
+                >
+                  {stakeLoading ? 'Unstaking...' : 'Unstake'}
+                </button>
+              </div>
             </div>
 
             {/* Claim rewards */}
