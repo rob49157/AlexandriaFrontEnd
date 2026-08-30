@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom'
 import SearchBar from '../components/SearchBar'
+import BackendStatus from '../components/BackendStatus'
 import '../styles/Home.css'
 
 const CATEGORIES = [
@@ -48,6 +49,7 @@ export default function Home() {
           <div className="home__search">
             <SearchBar size="large" placeholder="Search books, authors, or topics…" />
           </div>
+          <BackendStatus />
         </div>
         <div className="home__hero-glow" aria-hidden="true" />
       </section>
