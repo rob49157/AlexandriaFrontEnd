@@ -1,67 +1,83 @@
+import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import SearchBar from '../components/SearchBar'
 import BookCard from '../components/BookCard'
+import { searchBooks } from '../services/api'
 import { MOCK_BOOKS } from '../data/mockBooks'
 import '../styles/Search.css'
 
 const CATEGORIES = [
-  { slug: 'science',     label: 'Science',     count: 1284 },
-  { slug: 'history',     label: 'History',     count: 892  },
-  { slug: 'philosophy',  label: 'Philosophy',  count: 456  },
-  { slug: 'literature',  label: 'Literature',  count: 2103 },
-  { slug: 'mathematics', label: 'Mathematics', count: 678  },
-  { slug: 'technology',  label: 'Technology',  count: 945  },
-  { slug: 'medicine',    label: 'Medicine',    count: 731  },
-  { slug: 'arts',        label: 'Arts',        count: 312  },
+  { slug: 'science',     label: 'Science'     },
+  { slug: 'history',     label: 'History'     },
+  { slug: 'philosophy',  label: 'Philosophy'  },
+  { slug: 'literature',  label: 'Literature'  },
+  { slug: 'mathematics', label: 'Mathematics' },
+  { slug: 'technology',  label: 'Technology'  },
+  { slug: 'medicine',    label: 'Medicine'    },
+  { slug: 'arts',        label: 'Arts'        },
 ]
 
 const SORT_OPTIONS = [
   { value: 'newest',      label: 'Newest First'      },
-  { value: 'most-rented', label: 'Most Rented'       },
   { value: 'az',          label: 'A → Z'             },
-  { value: 'price-low',   label: 'Price: Low → High' },
 ]
-
-function applyFilters(books, { q, category, sort }) {
-  let results = books
-
-  if (q) {
-    const lower = q.toLowerCase()
-    results = results.filter(b =>
-      b.title.toLowerCase().includes(lower) ||
-      b.author.toLowerCase().includes(lower) ||
-      b.description.toLowerCase().includes(lower)
-    )
-  }
-
-  if (category) {
-    results = results.filter(b => b.category === category)
-  }
-
-  switch (sort) {
-    case 'az':
-      results = [...results].sort((a, b) => a.title.localeCompare(b.title))
-      break
-    case 'price-low':
-      results = [...results].sort((a, b) => a.rentalPrice - b.rentalPrice)
-      break
-    case 'most-rented':
-      results = [...results].sort((a, b) => b.rentals - a.rentals)
-      break
-    case 'newest':
-    default:
-      results = [...results].sort((a, b) => b.year - a.year)
-      break
-  }
-
-  return results
-}
 
 export default function Search() {
   const [params, setParams] = useSearchParams()
   const q        = params.get('q')        || ''
   const category = params.get('category') || ''
   const sort     = params.get('sort')     || 'newest'
+
+  const [books, setBooks] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [totalCount, setTotalCount] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+
+    async function loadResults() {
+      try {
+        // Query backend search API
+        const data = await searchBooks({ q, category, status: '', page: 1, limit: 50 })
+        if (cancelled) return
+
+        if (data && Array.isArray(data.results)) {
+          let sorted = [...data.results]
+          if (sort === 'az') {
+            sorted.sort((a, b) => a.title.localeCompare(b.title))
+          }
+          setBooks(sorted)
+          setTotalCount(data.total || sorted.length)
+        } else {
+          setBooks([])
+          setTotalCount(0)
+        }
+      } catch (err) {
+        console.warn('Backend search unreachable, falling back to mock catalog:', err.message)
+        if (cancelled) return
+        // Fallback filter over mock data for local testing
+        let results = MOCK_BOOKS
+        if (q) {
+          const lower = q.toLowerCase()
+          results = results.filter(b =>
+            b.title.toLowerCase().includes(lower) ||
+            b.author.toLowerCase().includes(lower)
+          )
+        }
+        if (category) {
+          results = results.filter(b => b.category === category)
+        }
+        setBooks(results)
+        setTotalCount(results.length)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+
+    loadResults()
+    return () => { cancelled = true }
+  }, [q, category, sort])
 
   const setFilter = (key, value) => {
     const next = new URLSearchParams(params)
@@ -76,11 +92,11 @@ export default function Search() {
     setParams(next, { replace: true })
   }
 
-  const books = applyFilters(MOCK_BOOKS, { q, category, sort })
   const activeCategoryLabel = CATEGORIES.find(c => c.slug === category)?.label
 
   const countLabel = (() => {
-    const n = books.length
+    if (loading) return 'Searching catalogue…'
+    const n = totalCount
     const suffix = n !== 1 ? 's' : ''
     const queryPart = q ? ` for "${q}"` : ''
     const catPart = activeCategoryLabel ? ` in ${activeCategoryLabel}` : ''
@@ -107,17 +123,15 @@ export default function Search() {
                   onClick={() => setFilter('category', '')}
                 >
                   All Categories
-                  <span className="search__filter-count">{MOCK_BOOKS.length}</span>
                 </button>
               </li>
-              {CATEGORIES.map(({ slug, label, count }) => (
+              {CATEGORIES.map(({ slug, label }) => (
                 <li key={slug}>
                   <button
                     className={`search__filter-item${category === slug ? ' search__filter-item--active' : ''}`}
                     onClick={() => setFilter('category', slug)}
                   >
                     {label}
-                    <span className="search__filter-count">{count.toLocaleString()}</span>
                   </button>
                 </li>
               ))}
@@ -150,7 +164,11 @@ export default function Search() {
             <p className="search__count">{countLabel}</p>
           </div>
 
-          {books.length === 0 ? (
+          {loading ? (
+            <div style={{ textAlign: 'center', padding: '4rem 0', color: 'var(--text-secondary)' }}>
+              Loading catalogue...
+            </div>
+          ) : books.length === 0 ? (
             <div className="search__empty">
               <span className="search__empty-icon">📚</span>
               <p className="search__empty-title">No books found</p>

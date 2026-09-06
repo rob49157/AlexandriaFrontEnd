@@ -1,6 +1,10 @@
 import { useState, useRef } from 'react'
 import { Link } from 'react-router-dom'
+import { parseUnits } from 'ethers'
 import { useWallet } from '../context/WalletContext'
+import { useContracts } from '../hooks/useContracts'
+import { uploadPdf } from '../services/api'
+import { ADDRESSES } from '../config/contracts'
 import '../styles/Upload.css'
 
 const CATEGORIES = [
@@ -19,8 +23,7 @@ const STAKE_DAYS   = 14
 
 const STAKE_STEPS = [
   { label: `Approve ${STAKE_AMOUNT} $ALEX spend` },
-  { label: 'Stake for upload'                     },
-  { label: 'Register on-chain'                    },
+  { label: 'Deposit stake on Base Sepolia'        },
 ]
 
 function formatBytes(bytes) {
@@ -34,6 +37,7 @@ function Spinner({ small }) {
 
 export default function Upload() {
   const { address, isCorrectNetwork, connect, switchToBaseSepolia } = useWallet()
+  const { tokenContract, stakeContract } = useContracts()
   const fileInputRef = useRef(null)
 
   // Form state
@@ -45,11 +49,13 @@ export default function Upload() {
   // Flow state
   const [step,         setStep]         = useState(1)       // 1 | 2 | 3
   const [arweaveHash,  setArweaveHash]  = useState(null)
+  const [registration, setRegistration] = useState(null)
   const [uploadState,  setUploadState]  = useState('idle')  // idle | busy | error
   const [uploadError,  setUploadError]  = useState(null)
-  const [stakeStep,    setStakeStep]    = useState(0)       // 0–3 completed
+  const [stakeStep,    setStakeStep]    = useState(0)       // 0–2 completed
   const [stakeState,   setStakeState]   = useState('idle')  // idle | busy | done | error
   const [stakeError,   setStakeError]   = useState(null)
+  const [stakeTxHash,  setStakeTxHash]  = useState(null)
 
   // ── File handling ─────────────────────────────────
   const handleFile = (f) => {
@@ -91,16 +97,17 @@ export default function Upload() {
     setUploadState('busy')
     setUploadError(null)
     try {
-      // const fd = new FormData()
-      // fd.append('pdf', file)
-      // Object.entries(form).forEach(([k, v]) => fd.append(k, v))
-      // fd.append('walletAddress', address)
-      // const res = await fetch(`${import.meta.env.VITE_API_URL}/upload`, { method: 'POST', body: fd })
-      // if (!res.ok) throw new Error(await res.text())
-      // const { arweaveHash } = await res.json()
-      await new Promise(r => setTimeout(r, 2200))
-      const mockHash = `ar${Date.now().toString(36).toUpperCase()}`
-      setArweaveHash(mockHash)
+      const fd = new FormData()
+      fd.append('file', file)
+      fd.append('title', form.title.trim())
+      fd.append('author', form.author.trim())
+      fd.append('category', form.category)
+      fd.append('description', form.description.trim())
+      fd.append('walletAddress', address)
+
+      const result = await uploadPdf(fd)
+      setArweaveHash(result.arweaveHash)
+      setRegistration(result.registration)
       setUploadState('idle')
       setStep(2)
     } catch (err) {
@@ -109,28 +116,36 @@ export default function Upload() {
     }
   }
 
-  // ── Step 2: Stake & register on-chain ────────────
+  // ── Step 2: Stake on-chain ────────────────────────
   const handleStake = async () => {
+    if (!tokenContract || !stakeContract) {
+      setStakeError('Contract instances not ready. Please check wallet connection.')
+      return
+    }
+    if (!address) { connect(); return }
+    if (!isCorrectNetwork) { switchToBaseSepolia(); return }
+
     setStakeState('busy')
     setStakeError(null)
     try {
-      // Step 1: token.approve(STAKE_CONTRACT_ADDRESS, parseUnits('100', 18))
+      const amountWei = parseUnits(STAKE_AMOUNT.toString(), 18)
+
+      // Step 1: token.approve(stakeContractAddress, amount)
       setStakeStep(1)
-      await new Promise(r => setTimeout(r, 1400))
+      const approveTx = await tokenContract.approve(ADDRESSES.stake, amountWei)
+      await approveTx.wait()
 
-      // Step 2: stake.stakeForUpload(arweaveHash, parseUnits('100', 18))
+      // Step 2: stake.stake(arweaveHash, amount)
       setStakeStep(2)
-      await new Promise(r => setTimeout(r, 1400))
+      const stakeTx = await stakeContract.stake(arweaveHash, amountWei)
+      const receipt = await stakeTx.wait()
 
-      // Step 3: library.registerUpload(arweaveHash, { title, author, category, description })
-      setStakeStep(3)
-      await new Promise(r => setTimeout(r, 1400))
-
+      setStakeTxHash(receipt?.hash || stakeTx.hash)
       setStakeState('done')
       setStep(3)
     } catch (err) {
       setStakeState('error')
-      setStakeError(err.message || 'Transaction failed.')
+      setStakeError(err.reason || err.message || 'Staking transaction failed.')
     }
   }
 
@@ -141,11 +156,13 @@ export default function Upload() {
     setErrors({})
     setStep(1)
     setArweaveHash(null)
+    setRegistration(null)
     setUploadState('idle')
     setUploadError(null)
     setStakeStep(0)
     setStakeState('idle')
     setStakeError(null)
+    setStakeTxHash(null)
   }
 
   const field = (key) => ({
@@ -168,7 +185,7 @@ export default function Upload() {
 
         {/* Step progress */}
         <div className="upload__stepper">
-          {['Upload PDF', 'Stake & Register', 'Complete'].map((label, i) => {
+          {['Upload PDF', 'Stake Deposit', 'Complete'].map((label, i) => {
             const n = i + 1
             const isDone   = step > n
             const isActive = step === n
@@ -313,7 +330,7 @@ export default function Upload() {
             {uploadState === 'busy' ? (
               <div className="upload__pending">
                 <Spinner />
-                Uploading · encrypting · storing on Arweave…
+                Validating · encrypting with AES-256 · sealing with Lit Protocol · storing on Arweave…
               </div>
             ) : (
               <button className="upload__cta" onClick={handleUpload}>
@@ -327,13 +344,15 @@ export default function Upload() {
           </div>
         )}
 
-        {/* ── Step 2: Stake & Register ── */}
+        {/* ── Step 2: Stake on-chain ── */}
         {step === 2 && (
           <div className="upload__card">
             <div className="upload__result-badge">
               <span className="upload__result-dot" />
               <div>
-                <p className="upload__result-label">Uploaded to Arweave</p>
+                <p className="upload__result-label">
+                  {registration?.registered ? 'Uploaded to Arweave & Registered On-Chain' : 'Uploaded to Arweave'}
+                </p>
                 <code className="upload__result-hash">{arweaveHash}</code>
               </div>
             </div>
@@ -346,7 +365,7 @@ export default function Upload() {
               </p>
               <p>
                 Librarians can challenge suspicious uploads during this window.
-                Valid uploads have their stake returned and earn a share of rental revenue.
+                Valid uploads have their stake returned and earn a 50 ALEX reward + rental revenue.
               </p>
             </div>
 
@@ -373,14 +392,14 @@ export default function Upload() {
 
             {stakeState === 'idle' && (
               <button className="upload__cta" onClick={handleStake}>
-                Begin Staking →
+                Stake {STAKE_AMOUNT} $ALEX →
               </button>
             )}
 
             {stakeState === 'busy' && (
               <div className="upload__pending">
                 <Spinner />
-                Waiting for wallet confirmation…
+                Waiting for wallet transaction confirmation on Base Sepolia…
               </div>
             )}
 
@@ -403,9 +422,9 @@ export default function Upload() {
         {step === 3 && (
           <div className="upload__card upload__done">
             <div className="upload__done-check">✓</div>
-            <h2 className="upload__done-title">Upload Complete</h2>
+            <h2 className="upload__done-title">Upload & Staking Complete</h2>
             <p className="upload__done-sub">
-              Your book is now pending review on Alexandria. You will earn rental revenue once it passes validation.
+              Your book is registered on Base Sepolia and entering the 14-day validation window.
             </p>
 
             <div className="upload__done-table">
@@ -421,9 +440,23 @@ export default function Upload() {
                 <span className="upload__done-key">Stake</span>
                 <span className="upload__done-val">{STAKE_AMOUNT} $ALEX · {STAKE_DAYS} days</span>
               </div>
+              {stakeTxHash && (
+                <div className="upload__done-row">
+                  <span className="upload__done-key">Stake Tx</span>
+                  <a
+                    href={`https://sepolia.basescan.org/tx/${stakeTxHash}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="upload__done-val upload__done-val--mono"
+                    style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+                  >
+                    {stakeTxHash.slice(0, 10)}…{stakeTxHash.slice(-8)}
+                  </a>
+                </div>
+              )}
               <div className="upload__done-row">
                 <span className="upload__done-key">Status</span>
-                <span className="upload__done-val upload__done-val--pending">Pending Review</span>
+                <span className="upload__done-val upload__done-val--pending">Pending Challenge Window</span>
               </div>
             </div>
 

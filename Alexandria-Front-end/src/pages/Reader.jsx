@@ -3,6 +3,9 @@ import { useParams, useNavigate } from 'react-router-dom'
 import * as pdfjsLib from 'pdfjs-dist'
 import { PDFDocument, rgb, StandardFonts, degrees } from 'pdf-lib'
 import { useWallet } from '../context/WalletContext'
+import { getUpload, getDecryptParams } from '../services/api'
+import { unwrapKeyFromLit } from '../services/lit'
+import { decryptPdfInBrowser, zeroMemory } from '../services/decryption'
 import { MOCK_BOOKS } from '../data/mockBooks'
 import '../styles/Reader.css'
 
@@ -11,45 +14,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString()
 
-// ── Mock PDF generation ───────────────────────────────────────────
-const LOREM =
-  'Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor ' +
-  'incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud ' +
-  'exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure ' +
-  'dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. ' +
-  'Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit ' +
-  'anim id est laborum. Sed ut perspiciatis unde omnis iste natus error sit voluptatem ' +
-  'accusantium doloremque laudantium totam rem aperiam eaque ipsa quae ab illo inventore.'
-
-async function generateMockPDF(book) {
-  const doc       = await PDFDocument.create()
-  const titleFont = await doc.embedFont(StandardFonts.TimesRomanBold)
-  const bodyFont  = await doc.embedFont(StandardFonts.TimesRoman)
-  const PAGE      = [595, 842]
-
-  // Title page
-  const tp = doc.addPage(PAGE)
-  tp.drawText(book?.title  ?? 'Untitled', { x: 72, y: 680, size: 28, font: titleFont, color: rgb(0.08, 0.08, 0.08), maxWidth: 451, lineHeight: 38 })
-  tp.drawText(book?.author ?? 'Unknown Author',  { x: 72, y: 580, size: 16, font: bodyFont,  color: rgb(0.35, 0.35, 0.35) })
-  tp.drawText('Preserved on Alexandria · Permanent Arweave Storage', { x: 72, y: 550, size: 10, font: bodyFont, color: rgb(0.6, 0.6, 0.6) })
-  if (book?.description) {
-    tp.drawText(book.description.slice(0, 300), { x: 72, y: 480, size: 11, font: bodyFont, color: rgb(0.25, 0.25, 0.25), maxWidth: 451, lineHeight: 18 })
-  }
-
-  // Content pages
-  for (let i = 1; i <= 9; i++) {
-    const p = doc.addPage(PAGE)
-    p.drawText(`Chapter ${i}`, { x: 72, y: 770, size: 15, font: titleFont, color: rgb(0.12, 0.12, 0.12) })
-    let y = 740
-    for (let j = 0; j < 5; j++) {
-      p.drawText(LOREM, { x: 72, y, size: 11, font: bodyFont, color: rgb(0.15, 0.15, 0.15), maxWidth: 451, lineHeight: 18 })
-      y -= 120
-    }
-    p.drawText(String(i + 1), { x: 291, y: 28, size: 9, font: bodyFont, color: rgb(0.5, 0.5, 0.5) })
-  }
-
-  return doc.save()
-}
+const ARWEAVE_GATEWAY = import.meta.env.VITE_ARWEAVE_GATEWAY || 'https://gateway.irys.xyz'
 
 // ── Watermarking ──────────────────────────────────────────────────
 async function addWatermarks(pdfBytes, { walletAddress, rentalDate, expiryDate }) {
@@ -75,15 +40,16 @@ async function addWatermarks(pdfBytes, { walletAddress, rentalDate, expiryDate }
 
 // ── Load steps ────────────────────────────────────────────────────
 const STEPS = [
-  { key: 'fetching',    label: 'Fetching encrypted PDF from Arweave'        },
-  { key: 'lit',         label: 'Requesting decryption key from Lit Protocol' },
-  { key: 'decrypting',  label: 'Decrypting PDF in browser memory'            },
-  { key: 'watermarking',label: 'Applying watermarks'                         },
+  { key: 'fetching',     label: 'Downloading encrypted PDF from Arweave'       },
+  { key: 'params',       label: 'Retrieving decryption envelope from backend' },
+  { key: 'lit',          label: 'Verifying on-chain rental & unsealing via Lit' },
+  { key: 'decrypting',   label: 'Decrypting PDF in browser memory (WebCrypto)' },
+  { key: 'watermarking', label: 'Applying reader watermark'                    },
 ]
 
 // ── Countdown ─────────────────────────────────────────────────────
 function Countdown({ expiryMs }) {
-  const [rem, setRem] = useState(Math.max(0, expiryMs - Date.now()))
+  const [rem, setRem] = useState(() => Math.max(0, expiryMs - Date.now()))
   useEffect(() => {
     const id = setInterval(() => setRem(Math.max(0, expiryMs - Date.now())), 1000)
     return () => clearInterval(id)
@@ -102,12 +68,12 @@ export default function Reader() {
   const navigate        = useNavigate()
   const { address }     = useWallet()
 
-  const book         = MOCK_BOOKS.find(b => b.arweaveHash === arweaveHash)
+  const [bookTitle,    setBookTitle]    = useState('')
   const storedExpiry = sessionStorage.getItem(`rental_expiry_${arweaveHash}`)
   const rentalExpiry = storedExpiry ? parseInt(storedExpiry, 10) : Date.now() + 7 * 86_400_000
 
   // Flow state
-  const [loadPhase,    setLoadPhase]    = useState('idle')  // idle|fetching|lit|decrypting|watermarking|ready|error
+  const [loadPhase,    setLoadPhase]    = useState('idle')  // idle|fetching|params|lit|decrypting|watermarking|ready|error
   const [doneSteps,    setDoneSteps]    = useState([])
   const [loadError,    setLoadError]    = useState(null)
 
@@ -118,11 +84,11 @@ export default function Reader() {
   const [scale,        setScale]        = useState(1.25)
   const [rendering,    setRendering]    = useState(false)
 
-  // Refs — never persisted to storage
+  // Refs — in-memory only, wiped on unmount
   const canvasRef      = useRef(null)
   const containerRef   = useRef(null)
   const renderTaskRef  = useRef(null)
-  const pdfBytesRef    = useRef(null) // in-memory only, wiped on unmount
+  const pdfBytesRef    = useRef(null)
 
   // ── Loading pipeline ──
   useEffect(() => {
@@ -133,36 +99,60 @@ export default function Reader() {
       const today      = new Date().toISOString().slice(0, 10)
       const expDate    = new Date(rentalExpiry).toISOString().slice(0, 10)
 
+      // Fetch book title for UI
+      getUpload(arweaveHash)
+        .then(data => { if (!cancelled && data?.title) setBookTitle(data.title) })
+        .catch(() => {
+          const mock = MOCK_BOOKS.find(b => b.arweaveHash === arweaveHash)
+          if (!cancelled && mock) setBookTitle(mock.title)
+        })
+
+      // Step 1: Download encrypted PDF from Arweave / Irys
       setLoadPhase('fetching')
-      // fetch(`https://arweave.net/${arweaveHash}`) then .arrayBuffer() → encryptedBytes
-      await new Promise(r => setTimeout(r, 1600))
-      if (cancelled) return
-      const rawBytes = await generateMockPDF(book) // replace with real Arweave fetch
+      const gatewayRes = await fetch(`${ARWEAVE_GATEWAY}/${arweaveHash}`)
+      if (!gatewayRes.ok) {
+        throw new Error(`Failed to download encrypted PDF from Arweave gateway (${gatewayRes.status})`)
+      }
+      const encryptedBuffer = await gatewayRes.arrayBuffer()
       if (cancelled) return
       setDoneSteps(s => [...s, 'fetching'])
 
+      // Step 2: Fetch decryption parameters from backend
+      setLoadPhase('params')
+      const decryptParams = await getDecryptParams(arweaveHash, walletAddr)
+      if (cancelled) return
+      setDoneSteps(s => [...s, 'params'])
+
+      // Step 3: Unwrap symmetric key via Lit Protocol TEE
       setLoadPhase('lit')
-      // const { decryptionKey } = await litClient.executeJs({ ... accessControlConditions, ... })
-      await new Promise(r => setTimeout(r, 1000))
+      const symmetricKeyBase64 = await unwrapKeyFromLit(decryptParams.litEncryptedKeyId, walletAddr)
       if (cancelled) return
       setDoneSteps(s => [...s, 'lit'])
 
+      // Step 4: WebCrypto AES-256-GCM decryption in browser RAM
       setLoadPhase('decrypting')
-      // const decryptedBytes = await decryptAES256GCM(encryptedBytes, decryptionKey)
-      await new Promise(r => setTimeout(r, 700))
+      const decryptedPdfBytes = await decryptPdfInBrowser(
+        encryptedBuffer,
+        symmetricKeyBase64,
+        decryptParams.encryptionIv,
+        decryptParams.encryptionAuthTag
+      )
       if (cancelled) return
       setDoneSteps(s => [...s, 'decrypting'])
 
+      // Step 5: Apply dynamic watermarks
       setLoadPhase('watermarking')
-      const watermarked = await addWatermarks(rawBytes, {
+      const watermarked = await addWatermarks(decryptedPdfBytes, {
         walletAddress: walletAddr,
         rentalDate: today,
         expiryDate: expDate,
       })
       if (cancelled) return
+      zeroMemory(decryptedPdfBytes) // zero unwatermarked buffer
       pdfBytesRef.current = watermarked
       setDoneSteps(s => [...s, 'watermarking'])
 
+      // Step 6: Render in PDF.js
       const task = pdfjsLib.getDocument({ data: watermarked })
       const doc  = await task.promise
       if (cancelled) return
@@ -173,14 +163,20 @@ export default function Reader() {
     }
 
     run().catch(err => {
-      if (!cancelled) { setLoadPhase('error'); setLoadError(err.message) }
+      if (!cancelled) {
+        setLoadPhase('error')
+        setLoadError(err.message || 'Failed to decrypt and load PDF.')
+      }
     })
 
     return () => {
       cancelled = true
-      pdfBytesRef.current = null
+      if (pdfBytesRef.current) {
+        zeroMemory(pdfBytesRef.current)
+        pdfBytesRef.current = null
+      }
     }
-  }, [])
+  }, [arweaveHash, address, rentalExpiry])
 
   // ── Render page on canvas ──
   useEffect(() => {
@@ -189,7 +185,11 @@ export default function Reader() {
 
     const render = async () => {
       setRendering(true)
-      if (renderTaskRef.current) { try { renderTaskRef.current.cancel() } catch {} }
+      if (renderTaskRef.current) {
+        try { renderTaskRef.current.cancel() }
+        // eslint-disable-next-line no-empty
+        catch {}
+      }
       try {
         const page     = await pdfDoc.getPage(currentPage)
         const viewport = page.getViewport({ scale })
@@ -223,7 +223,12 @@ export default function Reader() {
 
   // ── Clear on tab hide (security) ──
   useEffect(() => {
-    const onHide = () => { if (document.hidden) pdfBytesRef.current = null }
+    const onHide = () => {
+      if (document.hidden && pdfBytesRef.current) {
+        zeroMemory(pdfBytesRef.current)
+        pdfBytesRef.current = null
+      }
+    }
     document.addEventListener('visibilitychange', onHide)
     return () => document.removeEventListener('visibilitychange', onHide)
   }, [])
@@ -247,7 +252,7 @@ export default function Reader() {
         <div className="reader-load__card">
           <div className="reader-load__spinner" />
           <p className="reader-load__title">
-            {book ? `Opening: ${book.title}` : 'Opening book…'}
+            {bookTitle ? `Opening: ${bookTitle}` : 'Opening book…'}
           </p>
           <div className="reader-load__steps">
             {STEPS.map(({ key, label }) => {
@@ -272,8 +277,10 @@ export default function Reader() {
     return (
       <div className="reader-load">
         <div className="reader-load__card">
-          <p style={{ color: '#e06060', marginBottom: '1rem' }}>Failed to load book</p>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '1.5rem' }}>{loadError}</p>
+          <p style={{ color: '#e06060', marginBottom: '1rem', fontWeight: 600 }}>Failed to unlock book</p>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '1.5rem', lineHeight: 1.5 }}>
+            {loadError}
+          </p>
           <button onClick={goBack} style={{ background: 'var(--accent)', border: 'none', borderRadius: '8px', color: '#0a0a12', fontWeight: 700, padding: '0.625rem 1.5rem', cursor: 'pointer' }}>
             ← Back to Book
           </button>
@@ -287,7 +294,7 @@ export default function Reader() {
       {/* ── Top bar ── */}
       <header className="reader__topbar">
         <button className="reader__back" onClick={goBack}>← Back</button>
-        <span className="reader__book-title">{book?.title ?? arweaveHash}</span>
+        <span className="reader__book-title">{bookTitle || arweaveHash}</span>
         <div className="reader__expiry">
           <span className="reader__expiry-label">Expires in</span>
           <span className="reader__expiry-timer"><Countdown expiryMs={rentalExpiry} /></span>

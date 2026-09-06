@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-const API_URL = import.meta.env.VITE_API_URL
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api'
 
 // Minimal connectivity check: pings the backend /health endpoint on mount
 // and shows whether the frontend can reach the backend gateway.

@@ -9,19 +9,19 @@ This repository contains the **React frontend** for Alexandria, a decentralized,
 The frontend is the user-facing layer — it handles wallet interactions, communicates with the backend API for uploads/search, and calls smart contracts directly for all on-chain transactions (staking, registration, rentals, payments). It also handles in-browser PDF decryption and display for rented books.
 
 ### Alexandria System Architecture (Full Stack)
-- **Frontend (THIS REPO):** React + Vite (wallet connection, upload UI, search, rental, in-browser PDF decryption)
-- **Backend Gateway:** Node.js + Express (upload orchestration, validation, encryption, Arweave storage, MongoDB indexing) — `AlexNode` repo
+- **Frontend (THIS REPO):** React + Vite (wallet connection, upload UI, search, rental, in-browser PDF decryption via WebCrypto)
+- **Backend Gateway:** Node.js + Express (upload orchestration, validation, encryption, Arweave storage via Irys, PostgreSQL/Prisma indexing) — `AlexNode` repo
 - **AI Validation:** Python + FastAPI (OCR/text extraction, content quality analysis, NLP-based checks) — separate service
-- **Blockchain:** Base Testnet / Solidity (handles $ALEX token, archivist staking, time-bound rental permissions) — `AlexandriaSmartContract` repo
-- **Storage:** Arweave via Irys (permanent encrypted file storage) + MongoDB (off-chain search indexing)
+- **Blockchain:** Base Sepolia (84532) / Solidity (handles $ALEX token, archivist staking, time-bound rental permissions) — `AlexandriaSmartContract` repo
+- **Storage:** Arweave via Irys (permanent encrypted file storage) + PostgreSQL on Neon (off-chain search indexing)
 
 ### Frontend Responsibilities
 This app handles:
-- **Wallet Connection:** MetaMask integration for signing on-chain transactions
-- **Upload UI:** PDF file selection + metadata form, sends to backend, then handles on-chain staking and registration
+- **Wallet Connection:** MetaMask/Rabby integration for signing on-chain transactions on Base Sepolia
+- **Upload UI:** PDF file selection + metadata form, sends to backend, then handles on-chain staking
 - **Search & Browse:** Query the backend API, display paginated results with category filtering
-- **Rental Flow:** Call smart contracts directly to rent books and process payments
-- **PDF Decryption & Display:** Fetch encrypted PDFs from Arweave, retrieve decryption keys from Lit Protocol, decrypt in-browser, watermark, and display
+- **Rental Flow:** Call smart contracts directly to rent books with $ALEX
+- **PDF Decryption & Display:** Fetch encrypted PDFs from Arweave/Irys, retrieve symmetric key from Lit Protocol TEE, decrypt in-browser memory via WebCrypto, watermark, and display
 - **Archivist Dashboard:** View own uploads, stake status, countdown to release, rental revenue
 - **Librarian Dashboard:** Review flagged uploads, challenge suspicious content on-chain, claim rewards
 
@@ -29,8 +29,9 @@ This app handles:
 - **Validate PDFs** — backend handles all 5 validation layers
 - **Encrypt PDFs** — backend generates symmetric keys and encrypts before Arweave upload
 - **Upload to Arweave** — backend uploads encrypted PDFs via Irys
-- **Store data** — backend manages MongoDB, frontend only reads via API
-- **Listen to blockchain events** — backend event listener syncs on-chain state to MongoDB
+- **Register uploads on-chain** — backend registrar wallet registers uploads to AlexandriaLibrary
+- **Store data** — backend manages PostgreSQL, frontend only reads via API
+- **Listen to blockchain events** — backend event listener syncs on-chain state to PostgreSQL
 
 ## Key Flows
 
@@ -39,38 +40,38 @@ This app handles:
 === FRONTEND (UI + on-chain transactions) ===
 1. Archivist selects PDF file and fills in metadata (title, author, category, description)
 2. Frontend sends PDF + metadata + wallet address to backend: POST /api/upload
-3. Backend validates → encrypts → uploads to Arweave → encrypts key with Lit Protocol
-4. Backend saves to MongoDB with uploader wallet address and status "pending_stake"
-5. Backend returns { arweaveHash, litEncryptedKeyId } to frontend
+3. Backend validates → encrypts (AES-256) → signs Irys tx → seals key envelope in Lit TEE → uploads to Arweave → indexes in Postgres → registers on AlexandriaLibrary
+4. Backend returns { arweaveHash, litEncryptedKeyId, registration, nextStep } to frontend
 
 === FRONTEND (on-chain, signed by archivist's wallet) ===
-6. Frontend calls token.approve(stakeContractAddress, stakeAmount) — archivist signs
-7. Frontend calls stake.stakeForUpload(arweaveHash, stakeAmount) — archivist signs
-8. Frontend calls library.registerUpload(arweaveHash, metadata) — archivist signs
-9. Backend event listener picks up on-chain events → updates MongoDB status to "pending"
-10. Display confirmation with arweaveHash and stake status
+5. Frontend calls token.approve(stakeContractAddress, 100 ALEX) — archivist signs
+6. Frontend calls stake.stake(arweaveHash, 100 ALEX) — archivist signs
+7. Backend event listener picks up on-chain Staked event → updates status
+8. Display confirmation with arweaveHash and stake status
 ```
 
 ### Rental Flow (Reader)
 ```
 1. Reader searches for a book → frontend calls GET /api/search → displays results
-2. Reader selects a book → frontend shows details (title, author, category, description)
-3. Reader clicks rent → frontend calls rent.rentBook(arweaveHash, duration) — reader signs + pays $ALEX
-4. payment.sol automatically splits the fees (archivist / protocol / librarian pool)
-5. Rent.sol records: rentals[arweaveHash][readerAddress] = expiryTimestamp
+2. Reader selects a book → frontend calls GET /api/rental/book/:hash → shows details & price
+3. Reader selects duration (1, 7, or 30 days) and clicks rent
+4. Frontend calls token.approve(rentContractAddress, totalPrice) — reader signs
+5. Frontend calls rent.rentBook(arweaveHash, durationSeconds) — reader signs
+6. Rent.sol records active rental on-chain
 ```
 
 ### PDF Decryption & Display Flow (Reader — after rental)
 ```
-1. Frontend downloads encrypted PDF directly from Arweave: fetch(https://arweave.net/{arweaveHash})
-2. Frontend requests decryption key from Lit Protocol using litEncryptedKeyId
-   → Lit checks on-chain: Rent.sol.isRentalActive(arweaveHash, readerAddress)
-   → Rental is active → Lit releases the original symmetric key
-3. Frontend decrypts PDF in browser memory using AES-256-GCM
-4. Frontend watermarks every page (wallet address, rental date, expiry date, tx hash)
-5. Frontend displays watermarked PDF in viewer
-6. Frontend clears decrypted content from memory on page close or rental expiry
-   → Decrypted PDF is NEVER saved to localStorage or disk
+1. Frontend downloads encrypted PDF directly from Arweave/Irys: fetch(https://gateway.irys.xyz/{arweaveHash})
+2. Frontend requests decryption parameters from backend: GET /api/rental/decrypt-params/{arweaveHash}/{readerAddress}
+3. Frontend requests symmetric key from Lit Protocol TEE using litEncryptedKeyId
+   → Lit TEE executes Decryption Lit Action: unseals envelope, extracts sealed arweaveHash, verifies Rent.isRentalActive() / uploader carve-out
+   → Access authorized → Lit TEE releases symmetric key k
+4. Frontend decrypts PDF in browser memory using WebCrypto subtle.decrypt (AES-256-GCM)
+5. Frontend watermarks every page (wallet address, rental date, expiry date)
+6. Frontend displays watermarked PDF in viewer
+7. Frontend clears decrypted content from memory on component unmount, tab close, or rental expiry
+   → Decrypted PDF is NEVER saved to localStorage, IndexedDB, or disk
 ```
 
 ### Challenge Flow (Librarian)
