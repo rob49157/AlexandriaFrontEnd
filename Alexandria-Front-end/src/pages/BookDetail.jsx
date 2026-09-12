@@ -2,6 +2,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import { parseUnits } from 'ethers'
 import { useWallet } from '../context/WalletContext'
+import WalletSelectModal from '../components/WalletSelectModal'
 import { useContracts } from '../hooks/useContracts'
 import { getUpload, getRentalStatus, getBookRentalInfo } from '../services/api'
 import { ADDRESSES } from '../config/contracts'
@@ -48,9 +49,10 @@ function Countdown({ expiryMs }) {
 export default function BookDetail() {
   const { arweaveHash } = useParams()
   const navigate = useNavigate()
-  const { address, isCorrectNetwork, connect, switchToBaseSepolia } = useWallet()
+  const { address, isCorrectNetwork, switchToBaseSepolia } = useWallet()
   const { tokenContract, rentContract } = useContracts()
 
+  const [showWalletSelect, setShowWalletSelect] = useState(false)
   const [book, setBook] = useState(null)
   const [loading, setLoading] = useState(true)
   const [rentalInfo, setRentalInfo] = useState(null)
@@ -108,7 +110,7 @@ export default function BookDetail() {
 
   // ── Rent Book Transaction ─────────────────────────────
   const handleRent = async () => {
-    if (!address) { connect(); return }
+    if (!address) { setShowWalletSelect(true); return }
     if (!isCorrectNetwork) { switchToBaseSepolia(); return }
     if (!tokenContract || !rentContract) {
       setTxError('Smart contracts not initialized.')
@@ -315,6 +317,10 @@ export default function BookDetail() {
           </div>
         </div>
       </div>
+
+      {showWalletSelect && (
+        <WalletSelectModal onClose={() => setShowWalletSelect(false)} />
+      )}
     </main>
   )
 }
