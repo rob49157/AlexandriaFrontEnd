@@ -62,8 +62,20 @@
   transition: background var(--transition);
 }
 
-.dash__connect-btn:hover {
+/* Needs the extra class to outrank `.dash__connect p` above. */
+.dash__connect .dash__connect-error {
+  max-width: 30rem;
+  font-size: 0.875rem;
+  color: #e06060;
+}
+
+.dash__connect-btn:hover:not(:disabled) {
   background: var(--accent-hover);
+}
+
+.dash__connect-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* ── Stats row ─────────────────────────────────────── */

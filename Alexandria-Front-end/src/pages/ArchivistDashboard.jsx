@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { useWallet } from '../context/WalletContext'
+import ConnectWalletPrompt from '../components/ConnectWalletPrompt'
 import { searchBooks } from '../services/api'
 import '../styles/Dashboard.css'
 
@@ -35,7 +36,7 @@ const DEFAULT_UPLOADS = [
 ]
 
 export default function ArchivistDashboard() {
-  const { address, connect } = useWallet()
+  const { address } = useWallet()
   const [uploads, setUploads] = useState([])
   const [loading, setLoading] = useState(false)
 
@@ -82,10 +83,7 @@ export default function ArchivistDashboard() {
         </div>
 
         {!address ? (
-          <div className="dash__connect">
-            <p>Connect your wallet to view your archivist dashboard.</p>
-            <button className="dash__connect-btn" onClick={connect}>Connect Wallet</button>
-          </div>
+          <ConnectWalletPrompt message="Connect your wallet to view your archivist dashboard." />
         ) : (
           <>
             <div className="dash__stats">
