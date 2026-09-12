@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { ethers } from 'ethers'
 import { useWallet } from '../context/WalletContext'
+import ConnectWalletPrompt from '../components/ConnectWalletPrompt'
+import WalletSelectModal from '../components/WalletSelectModal'
 import { useContracts } from '../hooks/useContracts'
 import '../styles/Dashboard.css'
 
@@ -74,9 +76,10 @@ function truncate(addr) {
 }
 
 export default function LibrarianDashboard() {
-  const { address, connect } = useWallet()
+  const { address } = useWallet()
   const { tokenContract, stakeContract } = useContracts()
 
+  const [showWalletSelect, setShowWalletSelect] = useState(false)
   const [hidden,          setHidden]          = useState(new Set())
   const [challengeOpen,   setChallengeOpen]   = useState(null)
   const [reason,          setReason]          = useState('')
@@ -170,7 +173,7 @@ export default function LibrarianDashboard() {
   }
 
   const handleClaim = async () => {
-    if (!address) { connect(); return }
+    if (!address) { setShowWalletSelect(true); return }
     setClaimState('pending')
     // await stake.claimLibrarianRewards()
     await new Promise(r => setTimeout(r, 1400))
@@ -186,10 +189,7 @@ export default function LibrarianDashboard() {
         </div>
 
         {!address ? (
-          <div className="dash__connect">
-            <p>Connect your wallet to view your librarian dashboard.</p>
-            <button className="dash__connect-btn" onClick={connect}>Connect Wallet</button>
-          </div>
+          <ConnectWalletPrompt message="Connect your wallet to view your librarian dashboard." />
         ) : !isLibrarian ? (
           <div className="dash__connect">
             <h2>Become a Librarian</h2>
@@ -380,6 +380,10 @@ export default function LibrarianDashboard() {
           </>
         )}
       </div>
+
+      {showWalletSelect && (
+        <WalletSelectModal onClose={() => setShowWalletSelect(false)} />
+      )}
     </main>
   )
 }

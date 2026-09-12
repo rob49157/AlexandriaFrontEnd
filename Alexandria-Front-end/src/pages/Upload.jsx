@@ -2,6 +2,7 @@ import { useState, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { parseUnits } from 'ethers'
 import { useWallet } from '../context/WalletContext'
+import WalletSelectModal from '../components/WalletSelectModal'
 import { useContracts } from '../hooks/useContracts'
 import { uploadPdf } from '../services/api'
 import { ADDRESSES } from '../config/contracts'
@@ -36,9 +37,11 @@ function Spinner({ small }) {
 }
 
 export default function Upload() {
-  const { address, isCorrectNetwork, connect, switchToBaseSepolia } = useWallet()
+  const { address, isCorrectNetwork, connecting, error: walletError, switchToBaseSepolia } = useWallet()
   const { tokenContract, stakeContract } = useContracts()
   const fileInputRef = useRef(null)
+
+  const [showWalletSelect, setShowWalletSelect] = useState(false)
 
   // Form state
   const [file,       setFile]       = useState(null)
@@ -91,8 +94,8 @@ export default function Upload() {
   const handleUpload = async () => {
     const errs = validate()
     if (Object.keys(errs).length) { setErrors(errs); return }
-    if (!address)          { connect();              return }
-    if (!isCorrectNetwork) { switchToBaseSepolia();  return }
+    if (!address)          { setShowWalletSelect(true); return }
+    if (!isCorrectNetwork) { switchToBaseSepolia();     return }
 
     setUploadState('busy')
     setUploadError(null)
@@ -122,7 +125,7 @@ export default function Upload() {
       setStakeError('Contract instances not ready. Please check wallet connection.')
       return
     }
-    if (!address) { connect(); return }
+    if (!address) { setShowWalletSelect(true); return }
     if (!isCorrectNetwork) { switchToBaseSepolia(); return }
 
     setStakeState('busy')
@@ -210,8 +213,17 @@ export default function Upload() {
           <div className="upload__card">
             {!address && (
               <div className="upload__wallet-warning">
-                <span>Your wallet address is required to register as archivist.</span>
-                <button className="upload__wallet-connect" onClick={connect}>Connect Wallet</button>
+                <span>
+                  Your wallet address is required to register as archivist.
+                  {walletError && <span className="upload__wallet-error">{walletError}</span>}
+                </span>
+                <button
+                  className="upload__wallet-connect"
+                  onClick={() => setShowWalletSelect(true)}
+                  disabled={connecting}
+                >
+                  {connecting ? 'Connecting…' : 'Connect Wallet'}
+                </button>
               </div>
             )}
 
@@ -471,6 +483,10 @@ export default function Upload() {
           </div>
         )}
       </div>
+
+      {showWalletSelect && (
+        <WalletSelectModal onClose={() => setShowWalletSelect(false)} />
+      )}
     </main>
   )
 }
