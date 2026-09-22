@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { ethers } from 'ethers'
 import { useWallet } from '../context/WalletContext'
 import ConnectWalletPrompt from '../components/ConnectWalletPrompt'
 import WalletSelectModal from '../components/WalletSelectModal'
 import { useContracts } from '../hooks/useContracts'
+import { getReviewQueue } from '../services/api'
 import '../styles/Dashboard.css'
 
 const CATEGORY_STYLE = {
@@ -18,61 +19,64 @@ const CATEGORY_STYLE = {
   arts:        { color: '#c94ca8', bg: 'rgba(201, 76, 168, 0.08)'  },
 }
 
-const MOCK_QUEUE = [
-  {
-    arweaveHash: 'ar_sus01',
-    title: 'Make $10K Daily With Crypto',
-    author: 'Anonymous',
-    category: 'technology',
-    archivist: '0x9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b',
-    uploadedDaysAgo: 0,
-    aiScore: 12,
-  },
-  {
-    arweaveHash: 'ar009',
-    title: 'Thinking, Fast and Slow',
-    author: 'Daniel Kahneman',
-    category: 'science',
-    archivist: '0x7f8e9d0c1b2a3948576859687970818293a4b5c6',
-    uploadedDaysAgo: 1,
-    aiScore: 88,
-  },
-  {
-    arweaveHash: 'ar007',
-    title: "Gray's Anatomy",
-    author: 'Henry Gray',
-    category: 'medicine',
-    archivist: '0x3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d',
-    uploadedDaysAgo: 3,
-    aiScore: 91,
-  },
-  {
-    arweaveHash: 'ar004',
-    title: 'Ulysses',
-    author: 'James Joyce',
-    category: 'literature',
-    archivist: '0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b',
-    uploadedDaysAgo: 2,
-    aiScore: 94,
-  },
-]
-
 const CLAIMABLE = 18.5
 
-function scoreColor(score) {
-  if (score >= 80) return '#4caf7a'
-  if (score >= 60) return 'var(--accent)'
-  return '#e06060'
-}
+// How often the queue re-fetches itself. A book enters the queue when its
+// archivist stakes, which the librarian has no other way to learn about.
+const POLL_INTERVAL_MS = 60_000
 
-function timeAgo(days) {
-  if (days === 0) return 'today'
+// challengeUpload writes the reason permanently to contract storage, and a
+// resolver has to act on it later. "spam" is not a case.
+const MIN_REASON_LENGTH = 10
+
+function timeAgo(isoDate) {
+  if (!isoDate) return 'unknown'
+  const days = Math.floor((Date.now() - new Date(isoDate).getTime()) / 86_400_000)
+  if (days <= 0) return 'today'
   if (days === 1) return '1 day ago'
   return `${days} days ago`
 }
 
+/**
+ * Time left to act, from the on-chain challenge deadline.
+ *
+ * This replaces the old `X/100 (AI)` pill, which was invented in the frontend —
+ * the backend has no AI score (content analysis is a separate service and is not
+ * wired up yet). The deadline is the number that actually governs the librarian:
+ * past it, challengeUpload() reverts with "Challenge period expired".
+ */
+function challengeWindow(endsAt) {
+  if (!endsAt) return { text: '—', sub: 'no deadline', color: 'var(--text-muted)' }
+
+  const msLeft = new Date(endsAt).getTime() - Date.now()
+  if (msLeft <= 0) return { text: 'closed', sub: 'window expired', color: '#e06060' }
+
+  const hours = Math.floor(msLeft / 3_600_000)
+  const days = Math.floor(hours / 24)
+
+  return {
+    text: days >= 1 ? `${days}d ${hours % 24}h` : `${hours}h`,
+    sub: 'left to challenge',
+    // Under a day is the last chance to act on this book, ever.
+    color: hours < 24 ? '#eab308' : 'var(--text-secondary)',
+  }
+}
+
 function truncate(addr) {
+  if (!addr) return 'unknown'
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`
+}
+
+/**
+ * The most useful sentence we can get out of a failed transaction.
+ *
+ * ethers v6 decodes the contract's own require() strings, so "Already
+ * challenged" and "Challenge period expired" arrive verbatim and are worth far
+ * more to the librarian than a generic failure.
+ */
+function txErrorMessage(err) {
+  if (err?.code === 'ACTION_REJECTED') return 'Transaction rejected in your wallet.'
+  return err?.reason || err?.shortMessage || err?.message || 'Transaction failed.'
 }
 
 export default function LibrarianDashboard() {
@@ -84,7 +88,18 @@ export default function LibrarianDashboard() {
   const [challengeOpen,   setChallengeOpen]   = useState(null)
   const [reason,          setReason]          = useState('')
   const [challengeStates, setChallengeStates] = useState({}) // { hash: 'pending' | 'done' }
+  const [challengeError,  setChallengeError]  = useState(null)
   const [claimState,      setClaimState]      = useState('idle') // idle | pending | done
+
+  // Review queue, from GET /api/librarian/review-queue
+  const [queue,        setQueue]        = useState([])
+  // Every status=pending book the backend considered, before the on-chain
+  // filter. candidates > 0 with an empty queue is "nothing challengeable right
+  // now" — a different thing to say than "nothing pending at all".
+  const [candidates,   setCandidates]   = useState(0)
+  const [unavailable,  setUnavailable]  = useState(0)
+  const [queueLoading, setQueueLoading] = useState(false)
+  const [queueError,   setQueueError]   = useState(null)
 
   // Staking state
   const [isLibrarian, setIsLibrarian] = useState(false)
@@ -107,6 +122,43 @@ export default function LibrarianDashboard() {
     }
     checkLibrarianStatus()
   }, [address, stakeContract])
+
+  // ── Review queue ────────────────────────────────────────────────────────
+  // The backend does the challengeability filtering (Postgres for metadata,
+  // live stake reads for whether challengeUpload would actually succeed), so
+  // everything returned here is safe to put a Challenge button on.
+  const loadQueue = useCallback(async ({ silent = false } = {}) => {
+    if (!address) return
+    if (!silent) setQueueLoading(true)
+    try {
+      const data = await getReviewQueue({ librarian: address })
+      setQueue(Array.isArray(data.queue) ? data.queue : [])
+      setCandidates(data.candidates ?? 0)
+      setUnavailable(data.unavailable ?? 0)
+      setQueueError(null)
+    } catch (err) {
+      console.error('Could not load the review queue', err)
+      // No mock fallback. Fabricating a queue here is the bug this replaced.
+      setQueueError(err.message || 'Could not reach the backend.')
+    } finally {
+      setQueueLoading(false)
+    }
+  }, [address])
+
+  useEffect(() => {
+    if (!address || !isLibrarian) return
+
+    loadQueue()
+
+    // A book joins the queue when its archivist stakes — an event this page has
+    // no other way to hear about. Silent refresh so the list does not flash a
+    // spinner every minute; skipped while the tab is hidden.
+    const id = setInterval(() => {
+      if (!document.hidden) loadQueue({ silent: true })
+    }, POLL_INTERVAL_MS)
+
+    return () => clearInterval(id)
+  }, [address, isLibrarian, loadQueue])
 
   const handleStake = async () => {
     if (!stakeInput || isNaN(stakeInput)) return
@@ -147,27 +199,46 @@ export default function LibrarianDashboard() {
     }
   }
 
-  const queue = MOCK_QUEUE
-    .filter(b => !hidden.has(b.arweaveHash) && challengeStates[b.arweaveHash] !== 'done')
-    .sort((a, b) => a.aiScore - b.aiScore) // most suspicious first
+  // Backend already ordered by closing window and excluded anything the
+  // contract would reject; all that is left is this session's own dismissals.
+  const visibleQueue = queue.filter(
+    b => !hidden.has(b.arweaveHash) && challengeStates[b.arweaveHash] !== 'done'
+  )
 
   const handleSkip = (hash) => setHidden(s => new Set([...s, hash]))
 
   const openChallenge = (hash) => {
     setChallengeOpen(hash)
     setReason('')
+    setChallengeError(null)
   }
 
   const handleChallengeSubmit = async (hash) => {
-    if (!reason.trim()) return
+    const trimmed = reason.trim()
+    if (trimmed.length < MIN_REASON_LENGTH) return
+    if (!stakeContract) {
+      setChallengeError('Wallet not connected.')
+      return
+    }
+
+    setChallengeError(null)
     setChallengeStates(s => ({ ...s, [hash]: 'pending' }))
+
     try {
-      // await stake.challengeUpload(hash, reason)
-      await new Promise(r => setTimeout(r, 1400))
+      const tx = await stakeContract.challengeUpload(hash, trimmed)
+      await tx.wait()
+
       setChallengeStates(s => ({ ...s, [hash]: 'done' }))
       setChallengeOpen(null)
       setReason('')
-    } catch {
+      // The book is now Challenged on-chain, so the backend will stop returning
+      // it. Re-fetch rather than trusting local state to stay in step.
+      loadQueue({ silent: true })
+    } catch (err) {
+      console.error('Challenge failed', err)
+      // Surfaced inline, not in an alert: the contract's revert reason tells the
+      // librarian exactly which precondition failed.
+      setChallengeError(txErrorMessage(err))
       setChallengeStates(s => { const n = { ...s }; delete n[hash]; return n })
     }
   }
@@ -265,22 +336,44 @@ export default function LibrarianDashboard() {
             <div>
               <h2 className="dash__section-title">
                 Review Queue
-                {queue.length > 0 && (
-                  <span className="dash__queue-badge">{queue.length}</span>
+                {visibleQueue.length > 0 && (
+                  <span className="dash__queue-badge">{visibleQueue.length}</span>
                 )}
+                <button
+                  className="dash__refresh-btn"
+                  onClick={() => loadQueue()}
+                  disabled={queueLoading}
+                >
+                  {queueLoading ? 'Refreshing…' : '↻ Refresh'}
+                </button>
               </h2>
 
-              {queue.length === 0 ? (
+              {queueError ? (
+                <div className="dash__queue-error">
+                  <span>Could not load the review queue — {queueError}</span>
+                  <button className="dash__skip-btn" onClick={() => loadQueue()}>
+                    Retry
+                  </button>
+                </div>
+              ) : queueLoading && queue.length === 0 ? (
                 <div className="dash__empty">
-                  All caught up — no uploads pending review.
+                  <span className="dash__spinner" /> Loading review queue…
+                </div>
+              ) : visibleQueue.length === 0 ? (
+                <div className="dash__empty">
+                  {candidates > 0
+                    ? `${candidates} upload${candidates === 1 ? '' : 's'} pending, but none are open to challenge right now — ` +
+                      'each is either unstaked, past its 14-day window, already challenged, or your own.'
+                    : 'All caught up — no uploads pending review.'}
                 </div>
               ) : (
                 <div className="dash__list">
-                  {queue.map(book => {
+                  {visibleQueue.map(book => {
                     const cs = CATEGORY_STYLE[book.category] || { color: 'var(--accent)', bg: 'var(--accent-dim)' }
                     const initials = book.title.split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase()
                     const isOpen   = challengeOpen === book.arweaveHash
                     const isPending = challengeStates[book.arweaveHash] === 'pending'
+                    const win      = challengeWindow(book.challengePeriodEnds)
 
                     return (
                       <div key={book.arweaveHash} className="dash__queue-item">
@@ -303,14 +396,15 @@ export default function LibrarianDashboard() {
                               </span>
                             </p>
                             <p className="dash__archivist">
-                              {truncate(book.archivist)} · {timeAgo(book.uploadedDaysAgo)}
+                              {truncate(book.uploader)} · {timeAgo(book.uploadTimestamp)}
+                              {book.stakeAmountAlex && ` · ${book.stakeAmountAlex} $ALEX staked`}
                             </p>
                           </div>
 
                           <div className="dash__upload-right">
-                            <div className="dash__ai-score" style={{ color: scoreColor(book.aiScore) }}>
-                              <span className="dash__ai-value">{book.aiScore}</span>
-                              <span className="dash__ai-label">/100 AI</span>
+                            <div className="dash__window" style={{ color: win.color }}>
+                              <span className="dash__window-value">{win.text}</span>
+                              <span className="dash__window-label">{win.sub}</span>
                             </div>
                             <div className="dash__queue-actions">
                               <button
@@ -336,6 +430,9 @@ export default function LibrarianDashboard() {
                           <div className="dash__challenge-form">
                             <label className="dash__challenge-label">
                               Reason for challenge
+                              <span className="dash__window-label">
+                                {' '}— stored permanently on-chain, min {MIN_REASON_LENGTH} characters
+                              </span>
                             </label>
                             <textarea
                               className="dash__challenge-textarea"
@@ -349,14 +446,17 @@ export default function LibrarianDashboard() {
                               {isPending ? (
                                 <div className="dash__claim-pending">
                                   <span className="dash__spinner" />
-                                  Submitting challenge on-chain…
+                                  Confirm in your wallet, then waiting for the transaction…
                                 </div>
                               ) : (
                                 <>
+                                  {challengeError && (
+                                    <span className="dash__challenge-error">{challengeError}</span>
+                                  )}
                                   <button
                                     className="dash__challenge-submit"
                                     onClick={() => handleChallengeSubmit(book.arweaveHash)}
-                                    disabled={!reason.trim()}
+                                    disabled={reason.trim().length < MIN_REASON_LENGTH}
                                   >
                                     Submit Challenge →
                                   </button>
@@ -375,6 +475,13 @@ export default function LibrarianDashboard() {
                     )
                   })}
                 </div>
+              )}
+
+              {unavailable > 0 && !queueError && (
+                <p className="dash__queue-note">
+                  {unavailable} upload{unavailable === 1 ? '' : 's'} could not be checked against the
+                  chain and {unavailable === 1 ? 'is' : 'are'} hidden until the next refresh.
+                </p>
               )}
             </div>
           </>
