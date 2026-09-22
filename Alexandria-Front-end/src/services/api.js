@@ -126,3 +126,21 @@ export async function getRegistrarStatus() {
 export async function getStakeStatus(arweaveHash) {
   return fetchJson(`/stake/status/${encodeURIComponent(arweaveHash)}`);
 }
+
+/**
+ * Fetch the librarian review queue — books that are registered, actively staked,
+ * unchallenged and still inside the 14-day challenge window.
+ *
+ * The backend applies the same preconditions AlexandriaStake.challengeUpload()
+ * enforces, so every book returned is one the librarian can actually challenge.
+ * `librarian` is used only to drop the caller's own uploads.
+ *
+ * @param {{ librarian?: string, limit?: number }} params
+ */
+export async function getReviewQueue({ librarian = '', limit = 50 } = {}) {
+  const query = new URLSearchParams();
+  if (librarian) query.set('librarian', librarian);
+  if (limit) query.set('limit', String(limit));
+
+  return fetchJson(`/librarian/review-queue?${query.toString()}`);
+}

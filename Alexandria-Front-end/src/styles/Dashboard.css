@@ -399,22 +399,22 @@
   padding: 1rem 1.25rem;
 }
 
-/* ── AI score ──────────────────────────────────────── */
-.dash__ai-score {
+/* ── Challenge window countdown ────────────────────── */
+.dash__window {
   display: flex;
   align-items: baseline;
   gap: 0.1rem;
   margin-bottom: 0.4rem;
 }
 
-.dash__ai-value {
+.dash__window-value {
   font-family: var(--font-display);
   font-size: 1.5rem;
   font-weight: 600;
   line-height: 1;
 }
 
-.dash__ai-label {
+.dash__window-label {
   font-size: 0.72rem;
   color: var(--text-muted);
 }
@@ -586,4 +586,51 @@
     align-items: center;
     gap: 0.5rem;
   }
+}
+
+/* ── Review queue: refresh, errors, challenge feedback ── */
+.dash__refresh-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+
+.dash__refresh-btn:hover:not(:disabled) {
+  border-color: var(--border-accent);
+  color: var(--text-primary);
+}
+
+.dash__refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.dash__queue-error {
+  padding: 1.25rem 1.5rem;
+  border: 1px solid rgba(224, 96, 96, 0.35);
+  background: rgba(224, 96, 96, 0.06);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.dash__queue-note {
+  margin-top: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.dash__challenge-error {
+  color: #e06060;
+  font-size: 0.82rem;
+  margin-right: auto;
 }
