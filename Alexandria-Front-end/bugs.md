@@ -27,26 +27,31 @@ The Librarian Dashboard is responsible for content curation, upload reviews, qua
   * **ClamAV Security Scan Is Binary:** Virus scanning returns a pass/fail status (clean vs infected), which cannot be mapped to a linear score out of 100 without losing critical safety information.
   * **OCR / NLP Content Quality:** OCR text density and gibberish detection measure text readability and formatting.
   * **The Problem with 0–100 UI Scores:** Merging security scans, SimHash Hamming distance, and OCR quality into a single arbitrary `50/100` score masks the actual reason an upload was flagged and provides zero guidance on what the librarian should actually look for.
-* **Action Items & UX Improvement:**
-  * **[Backend]** Refactor review queue API payload to return categorized audit flags instead of a generic number:
+* **Corrections to the analysis above (found while implementing):**
+  * **No backend ever produced a score.** `aiScore` was a literal in the frontend's `MOCK_QUEUE`. There was nothing to refactor on the backend — the numbers were invented in the browser.
+  * **A malware badge can never fire.** Layer 2 rejects infected or script-carrying PDFs during upload, before encryption and Arweave storage, so a flagged file is never stored and never reaches the queue. Every book here passed. The only fact left worth reporting is whether ClamAV was actually running — it is skipped when the daemon is offline, which is the normal case in dev.
+  * **There is no OCR anywhere in the stack.** `ocrQuality` had no source: OCR and content-quality analysis belong to Tier 2 of the AI validator, which is still notes only (`Alex-AI-Validator/AI_VALIDATOR_NOTES.md`). What does exist is the text pdf-parse extracts at Layer 1, which was used for the fingerprint and then discarded.
+  * **`similarityPct` recreates the original problem.** It is `(64 − distance) / 64`, so two unrelated books score ~50% and everything flagged lands between 95.3% and 100%. The UI reports bits instead.
+* **Bug found and fixed along the way (`pageJoiner`):** pdf-parse appends `-- 3 of 212 --` after every page by default, and Layer 1 counted those markers as extracted text. Consequences: a scan with no OCR got a non-empty fingerprint, so the "no text, skip dedup" branch in `dedup.service.js` never ran; and any two scans with the same page count fingerprinted **identically**, flagging the second as a near-duplicate of the first. Fixed by extracting with `pageJoiner: ''`. Near-duplicate matches were also unsorted, so the stored `nearDuplicateOf` was not necessarily the closest match.
+* **Implemented — Backend (`AlexNode`):**
+  * New columns on `Upload` (all nullable; migration `20260922120000_add_upload_audit_fields`): `nearDuplicateDistance`, `clamavStatus`, `textWordCount`, `textlessPageCount`. The distance is backfilled from the stored fingerprints; the text counts cannot be backfilled, because the file on Arweave is encrypted.
+  * Word counts are measured with SimHash's own `tokenize()`, so the number shown is exactly what the fingerprint was built from.
+  * `GET /api/librarian/review-queue` returns an `audit` object per book. Matched books are named via one extra query for the whole page, and the fingerprint itself is never selected or sent.
     ```json
-    {
-      "securityStatus": "CLEAN", // CLEAN | MALWARE_DETECTED
-      "simHashMatch": {
-        "isDuplicate": true,
-        "matchedBookTitle": "Gray's Anatomy (1918 ed.)",
-        "hammingDistance": 2, // 2 bits difference out of 64
-        "similarityPct": 96.8
-      },
-      "ocrQuality": 42, // Extracted text readability percentage
-      "flags": ["NEAR_DUPLICATE", "LOW_OCR_QUALITY"]
+    "audit": {
+      "flags": ["NEAR_DUPLICATE", "NO_TEXT_LAYER", "MOSTLY_TEXTLESS"],
+      "security":  { "structuralScan": "passed", "clamav": "clean | not_run | unknown" },
+      "duplicate": { "arweaveHash": "…", "title": "Gray's Anatomy", "status": "approved",
+                     "sameUploader": false, "hammingDistance": 2, "threshold": 3 },
+      "text": { "wordCount": 62000, "wordsPerPage": 310, "textlessPages": 0, "pageCount": 200 }
     }
     ```
-  * **[Frontend]** Replace static `X/100` score pills with **Categorized Audit Badges & Risk Breakdown Cards**:
-    * **Malware Badge:** `[🛡️ Clean]` or `[🚨 Virus Flagged]`
-    * **SimHash Duplicate Badge:** `[📄 96.8% Duplicate match with "Book Title"]`
-    * **OCR Quality Badge:** `[🔍 Low Text Quality (42%)]`
-  * **[Frontend Guidance]** Add hover tooltips and an explicit **Audit Summary Callout** telling the librarian *exactly* why the book was queued (e.g., *"Flagged: High similarity to existing catalog item #ar009. Check for duplicate re-upload before approving."*).
+* **Implemented — Frontend:** `src/components/AuditBadges.jsx` renders three chips (Safety, Duplicate, Text) plus a callout naming what to go and look at, with a "What was actually checked?" disclosure (a disclosure, not a hover tooltip, so it works on touch and by keyboard) and a "Use as challenge reason" button that seeds the on-chain reason with the evidence.
+* **Deliberate wording choices:**
+  * A book with no text layer shows **"Duplicate check skipped"**, never "No duplicate found" — the silence of a check that never ran is not a result.
+  * Rows predating the new columns read **"not recorded"**, never "clean".
+  * Unflagged books still get a line, because this queue holds *every* staked book in its window, not only suspicious ones: *"No automated flags. These checks cover file safety and duplicate text only…"*
+* **Still open:** content quality, metadata accuracy, language and category verification remain unchecked — Tier 2 of the AI validator. The `flags` array takes new values without a shape change.
 
 ---
 

@@ -634,3 +634,152 @@
   font-size: 0.82rem;
   margin-right: auto;
 }
+
+/* ── Audit badges ─────────────────────────────────────────────────────────
+   The review queue's replacement for the old "X/100 (AI)" pill. Three chips,
+   one per check, plus a callout saying what to go and look at. Colour carries
+   emphasis only — every state is readable from its text alone. */
+
+.audit__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.audit__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.audit__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.audit__chip--ok {
+  color: #4caf7a;
+  border-color: rgba(76, 175, 122, 0.25);
+}
+
+.audit__chip--warn {
+  color: #eab308;
+  border-color: rgba(234, 179, 8, 0.3);
+  background: rgba(234, 179, 8, 0.06);
+}
+
+/* Not a warning and not a pass: nothing was recorded for this book. */
+.audit__chip--unknown {
+  color: var(--text-muted);
+  border-style: dashed;
+}
+
+.audit__summary {
+  border-top: 1px solid var(--border);
+  padding: 0.7rem 1rem 0.8rem;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.audit__summary--flagged {
+  background: rgba(234, 179, 8, 0.04);
+  border-top-color: rgba(234, 179, 8, 0.18);
+}
+
+.audit__notes {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  line-height: 1.5;
+}
+
+.audit__clear {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.audit__link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.audit__link:hover {
+  color: var(--accent-hover);
+}
+
+.audit__reason-btn {
+  margin-top: 0.6rem;
+  background: transparent;
+  border: 1px solid var(--border-accent);
+  color: var(--accent);
+  padding: 0.3rem 0.65rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.audit__reason-btn:hover {
+  background: var(--accent-dim);
+  color: var(--accent-hover);
+}
+
+.audit__why {
+  margin-top: 0.65rem;
+  font-size: 0.78rem;
+}
+
+.audit__why summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  list-style: none;
+}
+
+.audit__why summary::before {
+  content: '▸ ';
+}
+
+.audit__why[open] summary::before {
+  content: '▾ ';
+}
+
+.audit__why summary:hover,
+.audit__why summary:focus-visible {
+  color: var(--text-secondary);
+}
+
+.audit__why dl {
+  margin: 0.5rem 0 0;
+  padding-left: 0.9rem;
+  border-left: 2px solid var(--border);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.audit__why dt {
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-top: 0.5rem;
+}
+
+.audit__why dt:first-child {
+  margin-top: 0;
+}
+
+.audit__why dd {
+  margin: 0.15rem 0 0;
+}
