@@ -17,23 +17,33 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 const ARWEAVE_GATEWAY = import.meta.env.VITE_ARWEAVE_GATEWAY || 'https://gateway.irys.xyz'
 
 // ── Watermarking ──────────────────────────────────────────────────
-async function addWatermarks(pdfBytes, { walletAddress, rentalDate, expiryDate }) {
+// One symmetric key protects a book for everyone who ever reads it, so if a
+// copy leaks, the only thing that says who leaked it is the page itself. A
+// librarian review copy is marked as such: it is a book nobody can rent yet, so
+// a leaked one is traceable to the handful of wallets that could open it.
+async function addWatermarks(pdfBytes, { walletAddress, rentalDate, expiryDate, grantedVia }) {
   const doc      = await PDFDocument.load(pdfBytes)
   const font     = await doc.embedFont(StandardFonts.Helvetica)
   const boldFont = await doc.embedFont(StandardFonts.HelveticaBold)
-  const footer   = `Licensed to: ${walletAddress} | Rental: ${rentalDate} | Expires: ${expiryDate}`
+  const isReview = grantedVia === 'librarian_review'
+  const footer   = isReview
+    ? `LIBRARIAN REVIEW COPY — not for distribution | Librarian: ${walletAddress} | Opened: ${rentalDate}`
+    : `Licensed to: ${walletAddress} | Rental: ${rentalDate} | Expires: ${expiryDate}`
 
   for (const page of doc.getPages()) {
     const { width, height } = page.getSize()
     // Footer strip
     page.drawText(footer, { x: 10, y: 11, size: 6, font, color: rgb(0.45, 0.45, 0.45), opacity: 0.75 })
     // Diagonal ghost watermark
-    page.drawText(walletAddress.slice(0, 18) + '…', {
-      x: width / 2 - 90, y: height / 2,
-      size: 16, font: boldFont,
-      color: rgb(0.65, 0.65, 0.65), opacity: 0.06,
-      rotate: degrees(40),
-    })
+    page.drawText(
+      isReview ? `REVIEW COPY ${walletAddress.slice(0, 10)}…` : walletAddress.slice(0, 18) + '…',
+      {
+        x: width / 2 - 90, y: height / 2,
+        size: 16, font: boldFont,
+        color: rgb(0.65, 0.65, 0.65), opacity: 0.06,
+        rotate: degrees(40),
+      }
+    )
   }
   return doc.save()
 }
@@ -76,6 +86,9 @@ export default function Reader() {
   const [loadPhase,    setLoadPhase]    = useState('idle')  // idle|fetching|params|lit|decrypting|watermarking|ready|error
   const [doneSteps,    setDoneSteps]    = useState([])
   const [loadError,    setLoadError]    = useState(null)
+  // Which door the Lit Action let this reader through: rental | uploader |
+  // librarian_review. Set from the Action's own verdict once the key arrives.
+  const [accessMode,   setAccessMode]   = useState('rental')
 
   // PDF state
   const [pdfDoc,       setPdfDoc]       = useState(null)
@@ -125,8 +138,14 @@ export default function Reader() {
 
       // Step 3: Unwrap symmetric key via Lit Protocol TEE
       setLoadPhase('lit')
-      const symmetricKeyBase64 = await unwrapKeyFromLit(decryptParams.litEncryptedKeyId, walletAddr)
+      const { key: symmetricKeyBase64, grantedVia } = await unwrapKeyFromLit(
+        decryptParams.litEncryptedKeyId,
+        walletAddr
+      )
       if (cancelled) return
+      // The TEE decided which door this reader came through; the backend's own
+      // answer is only advisory, so the Action's verdict is what gets stamped.
+      setAccessMode(grantedVia)
       setDoneSteps(s => [...s, 'lit'])
 
       // Step 4: WebCrypto AES-256-GCM decryption in browser RAM
@@ -146,6 +165,7 @@ export default function Reader() {
         walletAddress: walletAddr,
         rentalDate: today,
         expiryDate: expDate,
+        grantedVia,
       })
       if (cancelled) return
       zeroMemory(decryptedPdfBytes) // zero unwatermarked buffer
@@ -234,12 +254,16 @@ export default function Reader() {
   }, [])
 
   // ── Rental expiry redirect ──
+  // A review copy has no rental to expire. Its limit is the challenge window,
+  // which the Lit Action enforces on the next unlock — kicking the librarian out
+  // on a rental clock they never started would just be wrong.
   useEffect(() => {
+    if (accessMode === 'librarian_review') return undefined
     const id = setInterval(() => {
       if (Date.now() > rentalExpiry) navigate(`/book/${arweaveHash}`)
     }, 15_000)
     return () => clearInterval(id)
-  }, [rentalExpiry, arweaveHash, navigate])
+  }, [accessMode, rentalExpiry, arweaveHash, navigate])
 
   const zoomIn  = useCallback(() => setScale(s => Math.min(+(s + 0.25).toFixed(2), 2.5)), [])
   const zoomOut = useCallback(() => setScale(s => Math.max(+(s - 0.25).toFixed(2), 0.5)), [])
@@ -296,8 +320,17 @@ export default function Reader() {
         <button className="reader__back" onClick={goBack}>← Back</button>
         <span className="reader__book-title">{bookTitle || arweaveHash}</span>
         <div className="reader__expiry">
-          <span className="reader__expiry-label">Expires in</span>
-          <span className="reader__expiry-timer"><Countdown expiryMs={rentalExpiry} /></span>
+          {accessMode === 'librarian_review' ? (
+            <>
+              <span className="reader__expiry-label">Librarian review copy</span>
+              <span className="reader__expiry-timer">every page is watermarked</span>
+            </>
+          ) : (
+            <>
+              <span className="reader__expiry-label">Expires in</span>
+              <span className="reader__expiry-timer"><Countdown expiryMs={rentalExpiry} /></span>
+            </>
+          )}
         </div>
       </header>
 

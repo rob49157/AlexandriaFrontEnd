@@ -4,85 +4,22 @@
 // The TEE executes the immutable Decryption Lit Action, which validates on-chain
 // rental permissions on Base Sepolia against the arweaveHash sealed inside the envelope.
 
+import { LIT_DECRYPT_ACTION_CODE } from './litAction';
+
 const LIT_API_URL = import.meta.env.VITE_LIT_API_URL || 'https://api.chipotle.litprotocol.com/core/v1';
 const LIT_PKP_ID = import.meta.env.VITE_LIT_PKP_ID || '';
 const LIT_API_KEY = import.meta.env.VITE_LIT_API_KEY || '';
-
-// The exact Decryption Lit Action executed in the TEE
-const LIT_DECRYPT_ACTION_CODE = `
-async function main({ pkpId, ciphertext, userAddress }) {
-  if (!userAddress || typeof userAddress !== 'string') {
-    Lit.Actions.setResponse({ response: JSON.stringify({ error: 'missing_user_address' }) });
-    return;
-  }
-
-  let unsealedStr;
-  try {
-    const res = await Lit.Actions.Decrypt({ pkpId, ciphertext });
-    unsealedStr = typeof res === 'string' ? res : (res.decrypted || res.plaintext || JSON.stringify(res));
-  } catch (err) {
-    Lit.Actions.setResponse({ response: JSON.stringify({ error: 'unseal_failed' }) });
-    return;
-  }
-
-  let envelope;
-  try {
-    envelope = typeof unsealedStr === 'object' && unsealedStr !== null ? unsealedStr : JSON.parse(unsealedStr);
-  } catch (err) {
-    Lit.Actions.setResponse({ response: JSON.stringify({ error: 'invalid_envelope_json' }) });
-    return;
-  }
-
-  if (!envelope || envelope.v !== 1 || !envelope.k || !envelope.arweaveHash) {
-    Lit.Actions.setResponse({ response: JSON.stringify({ error: 'invalid_envelope_format' }) });
-    return;
-  }
-
-  const { k, arweaveHash } = envelope;
-  const user = userAddress.toLowerCase();
-
-  const provider = new ethers.providers.JsonRpcProvider('https://base-sepolia-rpc.publicnode.com');
-  const rentContract = new ethers.Contract(
-    '0xe50AD653Ee690c818900091a4d69F22e484bD2cD',
-    ['function isRentalActive(string,address) view returns (bool)'],
-    provider
-  );
-  const libraryContract = new ethers.Contract(
-    '0x0b26AB8C632586E846DE87D29D665fd727bBe844',
-    ['function getUploader(string) view returns (address)'],
-    provider
-  );
-
-  let isRented = false;
-  try {
-    isRented = await rentContract.isRentalActive(arweaveHash, userAddress);
-  } catch (err) {
-    isRented = false;
-  }
-
-  let isOwner = false;
-  try {
-    const uploader = await libraryContract.getUploader(arweaveHash);
-    isOwner = Boolean(uploader && uploader.toLowerCase() === user);
-  } catch (err) {
-    isOwner = false;
-  }
-
-  if (!isRented && !isOwner) {
-    Lit.Actions.setResponse({ response: JSON.stringify({ error: 'access_denied' }) });
-    return;
-  }
-
-  Lit.Actions.setResponse({ response: JSON.stringify({ key: k }) });
-}
-`.trim();
 
 /**
  * Request the symmetric AES key from Lit Protocol TEE.
  *
  * @param {string} sealedCiphertext - The litEncryptedKeyId from decrypt-params
  * @param {string} userAddress      - The reader's connected wallet address
- * @returns {Promise<string>}       - The 32-byte base64-encoded AES key (k)
+ * @returns {Promise<{ key: string, grantedVia: string }>}
+ *   key        — 32-byte base64-encoded AES key (k)
+ *   grantedVia — 'rental' | 'uploader' | 'librarian_review', which decides the
+ *                watermark stamped on every page. A review copy has to be
+ *                identifiable as one if it ever leaves the librarian's screen.
  */
 export async function unwrapKeyFromLit(sealedCiphertext, userAddress) {
   if (!sealedCiphertext) {
@@ -134,7 +71,10 @@ export async function unwrapKeyFromLit(sealedCiphertext, userAddress) {
 
   if (parsedResponse?.error) {
     if (parsedResponse.error === 'access_denied') {
-      throw new Error('Access Denied: No active rental or archivist ownership found on Base Sepolia.');
+      throw new Error(
+        'Access Denied: Base Sepolia shows no active rental, archivist ownership, ' +
+          'or open librarian review window for this book.'
+      );
     }
     throw new Error(`Lit Action rejected request: ${parsedResponse.error}`);
   }
@@ -145,5 +85,7 @@ export async function unwrapKeyFromLit(sealedCiphertext, userAddress) {
     throw new Error('Lit Action returned incomplete response without symmetric key.');
   }
 
-  return key;
+  // Older permitted versions of the Action returned the key alone. Treat a
+  // missing grantedVia as a rental rather than guessing something weaker.
+  return { key, grantedVia: parsedResponse?.grantedVia || 'rental' };
 }

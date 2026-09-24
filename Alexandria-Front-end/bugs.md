@@ -60,9 +60,36 @@ The Librarian Dashboard is responsible for content curation, upload reviews, qua
 * **Root Cause Analysis:**
   * **Frontend:** `LibrarianDashboard.jsx` only shows metadata (Title, Author, Category, Uploader Address, AI Score). There is no "View Book" or "Inspect Content" button.
   * **Encryption Constraints:** Uploaded PDFs are AES-256 encrypted on Arweave. Key access via Lit Protocol currently requires an active on-chain rental (`Rent.sol.isRentalActive()`), which librarians do not possess for unreleased/pending books.
-* **Action Items:**
-  * **[Backend / Lit Protocol]** Configure a **Librarian Access Provision** in Lit Protocol TEE or backend preview service allowing wallets with active librarian stakes (`stakeContract.librarians(address).active == true`) to decrypt a watermarked preview/excerpt.
-  * **[Frontend]** Add an **"Inspect Book" / "Preview Document"** modal to `LibrarianDashboard.jsx` utilizing `PDFViewer.jsx` with librarian-specific watermarking (*"Librarian Review Copy — Wallet 0x..."*).
+* **Correction: a "preview/excerpt" is not possible with key release.** Lit hands over the symmetric key, and that key decrypts the whole file. Rendering only the first N pages is a frontend choice with the full plaintext already in the browser, so it enforces nothing. The only design that produces a real excerpt is extracting unencrypted preview pages at upload time — worth doing later for public previews on BookDetail, but it does nothing for books already uploaded. Librarians therefore get the whole book, watermarked as a review copy.
+* **Implemented — the carve-out lives in the decryption Lit Action** (`src/services/litAction.js`), which is the only thing that actually decides. A third branch grants access when all four of these hold, mirroring what `AlexandriaStake.challengeUpload()` itself requires:
+  * `stake.librarians(caller).active`
+  * `stake.stakes(arweaveHash).active`
+  * `library.getUploadStatus(arweaveHash) == Pending`
+  * `latestBlock.timestamp < stakedAt + CHALLENGE_PERIOD`
+
+  "Now" is the latest block timestamp rather than the enclave clock, so the Action and the contract agree on when the window shuts. Any unreadable contract state denies. Access ends with the window, so this grants no standing access to the catalogue — a librarian cannot open an approved book they hold no rental for.
+* **Why this costs no rental revenue:** a book inside its challenge window is not rentable at all (`Rent.rentBook()` requires Approved), so there was never a rental for a librarian to buy in good faith.
+* **Implemented — supporting changes:**
+  * The Action returns `grantedVia` (`rental` | `uploader` | `librarian_review`), which selects the watermark: *"LIBRARIAN REVIEW COPY — not for distribution | Librarian: 0x… | Opened: …"* on every page, plus the diagonal ghost mark.
+  * `GET /api/rental/decrypt-params` no longer 403s an eligible librarian (`isActiveLibrarian()` in `blockchain.service.js`). Still defense-in-depth only — the address is an unsigned URL parameter, as that file documents.
+  * `Reader.jsx` shows a review banner instead of the rental countdown and skips the rental-expiry redirect, which a review copy never had.
+  * `LibrarianDashboard.jsx` gains an **Inspect** action per queue row, linking to `/read/:arweaveHash`.
+  * The Action source, its tests and the CID registration script all live in **this** repo, because the browser is what executes it — Lit hashes the exact bytes the frontend sends. It previously existed as two hand-maintained copies (one here, one in `AlexNode/services/litAction.js`), where a one-character drift would have failed every decryption with an opaque permission error. The backend copy is now deleted; the backend never ran it.
+  * `tests/decryptionAction.test.js` (run with `npm run test:lit-action`) **executes the shipped Action source** in a sandbox with stubbed Lit/ethers globals. It previously reimplemented the logic in the test, so it could pass while the real Action was broken. 23 cases, seven of them refusals of the review grant. Plain Node, no test framework — the same hand-rolled style as the backend suites.
+
+#### 1.3 — Open items (blocked on the account owner)
+
+1. **Register the new Action CID against the PKP.** Editing the Action changed its IPFS CID to `QmcDAyJfwFP29JtufMULaUxo6eTPdqvE6PvPfGJLxtgn6Q`, and Lit will not run a CID the PKP has not permitted — that restriction is exactly what stops an attacker submitting their own Action with the checks removed. Until this runs, librarian inspection cannot work:
+   ```bash
+   npm run lit:register                # dry run, free, prints the CID
+   npm run lit:register -- --register  # metered write against account credits
+   ```
+   Needs `LIT_API_KEY` in `.env` — no `VITE_` prefix, so Vite keeps this admin key out of the bundle.
+   The previous CID stays permitted deliberately: it grants strictly less (no review branch), so an older frontend keeps working mid-rollout. Remove it from the group once no old clients remain.
+2. **The frontend has no Lit configuration at all.** `src/services/lit.js` reads `VITE_LIT_PKP_ID` and `VITE_LIT_API_KEY`; neither is in `.env` (it has only an unused `VITE_LIT_NETWORK`), so `pkpId` goes out empty and no decryption has ever run in this environment — for renters either, not just librarians. Setting the API key there **ships it in the JavaScript bundle**, where anyone can extract it and spend account credits at $0.01 per call, which also drains the balance real readers need. Options, in order of preference:
+   * Ask Lit whether a short-lived, scoped key can be minted server-side per reader session — the backend would then never see the symmetric key, preserving the invariant in `KEY-BINDING.md`.
+   * Ship a scoped key with a deliberately small balance and top-up alerts.
+   * Do **not** proxy the call through the backend: the Action's response contains the symmetric key, so the backend would see every book's key.
 
 ---
 

@@ -783,3 +783,23 @@
 .audit__why dd {
   margin: 0.15rem 0 0;
 }
+
+/* Inspect — opens the book in the reader under a librarian review grant. */
+.dash__inspect-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: border-color var(--transition), color var(--transition);
+}
+
+.dash__inspect-btn:hover {
+  border-color: var(--border-accent);
+  color: var(--accent);
+}

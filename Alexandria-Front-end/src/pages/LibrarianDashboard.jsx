@@ -412,6 +412,16 @@ export default function LibrarianDashboard() {
                               <span className="dash__window-label">{win.sub}</span>
                             </div>
                             <div className="dash__queue-actions">
+                              {/* Reading the book is the whole job. The Lit Action
+                                  grants review access for exactly as long as this
+                                  book stays challengeable, and stamps every page
+                                  with the librarian's wallet. */}
+                              <Link
+                                to={`/read/${book.arweaveHash}`}
+                                className="dash__inspect-btn"
+                              >
+                                📖 Inspect
+                              </Link>
                               <button
                                 className="dash__challenge-btn"
                                 onClick={() => isOpen ? setChallengeOpen(null) : openChallenge(book.arweaveHash)}
