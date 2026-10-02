@@ -26,4 +26,11 @@ export default defineConfig([
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
     },
   },
+  {
+    // Node-side tooling: the Lit Action test suite and the CID registration
+    // script run under `node`, not in the browser, so they get Node globals and
+    // none of the React rules.
+    files: ['tests/**/*.js', 'scripts/**/*.js'],
+    languageOptions: { globals: globals.node },
+  },
 ])

@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:lit-action": "node tests/decryptionAction.test.js",
+    "lit:register": "node --env-file=.env scripts/lit-register-decrypt-action.js"
   },
   "dependencies": {
     "ethers": "^6.16.0",

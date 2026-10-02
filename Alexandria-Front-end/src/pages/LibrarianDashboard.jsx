@@ -5,6 +5,7 @@ import { useWallet } from '../context/WalletContext'
 import ConnectWalletPrompt from '../components/ConnectWalletPrompt'
 import WalletSelectModal from '../components/WalletSelectModal'
 import { useContracts } from '../hooks/useContracts'
+import { AuditBadges, AuditSummary } from '../components/AuditBadges'
 import { getReviewQueue } from '../services/api'
 import '../styles/Dashboard.css'
 
@@ -207,9 +208,12 @@ export default function LibrarianDashboard() {
 
   const handleSkip = (hash) => setHidden(s => new Set([...s, hash]))
 
-  const openChallenge = (hash) => {
+  // `prefill` carries the audit findings into the reason box. The librarian
+  // still edits and submits it — it goes on-chain permanently under their
+  // signature, so it is a starting sentence, never a submitted one.
+  const openChallenge = (hash, prefill = '') => {
     setChallengeOpen(hash)
-    setReason('')
+    setReason(prefill)
     setChallengeError(null)
   }
 
@@ -399,6 +403,7 @@ export default function LibrarianDashboard() {
                               {truncate(book.uploader)} · {timeAgo(book.uploadTimestamp)}
                               {book.stakeAmountAlex && ` · ${book.stakeAmountAlex} $ALEX staked`}
                             </p>
+                            <AuditBadges audit={book.audit} />
                           </div>
 
                           <div className="dash__upload-right">
@@ -407,6 +412,16 @@ export default function LibrarianDashboard() {
                               <span className="dash__window-label">{win.sub}</span>
                             </div>
                             <div className="dash__queue-actions">
+                              {/* Reading the book is the whole job. The Lit Action
+                                  grants review access for exactly as long as this
+                                  book stays challengeable, and stamps every page
+                                  with the librarian's wallet. */}
+                              <Link
+                                to={`/read/${book.arweaveHash}`}
+                                className="dash__inspect-btn"
+                              >
+                                📖 Inspect
+                              </Link>
                               <button
                                 className="dash__challenge-btn"
                                 onClick={() => isOpen ? setChallengeOpen(null) : openChallenge(book.arweaveHash)}
@@ -424,6 +439,12 @@ export default function LibrarianDashboard() {
                             </div>
                           </div>
                         </div>
+
+                        {/* Why this book is worth a look — and what no check covered */}
+                        <AuditSummary
+                          audit={book.audit}
+                          onUseReason={(text) => openChallenge(book.arweaveHash, text)}
+                        />
 
                         {/* Inline challenge form */}
                         {isOpen && (
