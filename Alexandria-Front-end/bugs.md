@@ -77,19 +77,36 @@ The Librarian Dashboard is responsible for content curation, upload reviews, qua
   * The Action source, its tests and the CID registration script all live in **this** repo, because the browser is what executes it — Lit hashes the exact bytes the frontend sends. It previously existed as two hand-maintained copies (one here, one in `AlexNode/services/litAction.js`), where a one-character drift would have failed every decryption with an opaque permission error. The backend copy is now deleted; the backend never ran it.
   * `tests/decryptionAction.test.js` (run with `npm run test:lit-action`) **executes the shipped Action source** in a sandbox with stubbed Lit/ethers globals. It previously reimplemented the logic in the test, so it could pass while the real Action was broken. 23 cases, seven of them refusals of the review grant. Plain Node, no test framework — the same hand-rolled style as the backend suites.
 
-#### 1.3 — Open items (blocked on the account owner)
+---
 
-1. **Register the new Action CID against the PKP.** Editing the Action changed its IPFS CID to `QmcDAyJfwFP29JtufMULaUxo6eTPdqvE6PvPfGJLxtgn6Q`, and Lit will not run a CID the PKP has not permitted — that restriction is exactly what stops an attacker submitting their own Action with the checks removed. Until this runs, librarian inspection cannot work:
-   ```bash
-   npm run lit:register                # dry run, free, prints the CID
-   npm run lit:register -- --register  # metered write against account credits
-   ```
-   Needs `LIT_API_KEY` in `.env` — no `VITE_` prefix, so Vite keeps this admin key out of the bundle.
-   The previous CID stays permitted deliberately: it grants strictly less (no review branch), so an older frontend keeps working mid-rollout. Remove it from the group once no old clients remain.
-2. **The frontend has no Lit configuration at all.** `src/services/lit.js` reads `VITE_LIT_PKP_ID` and `VITE_LIT_API_KEY`; neither is in `.env` (it has only an unused `VITE_LIT_NETWORK`), so `pkpId` goes out empty and no decryption has ever run in this environment — for renters either, not just librarians. Setting the API key there **ships it in the JavaScript bundle**, where anyone can extract it and spend account credits at $0.01 per call, which also drains the balance real readers need. Options, in order of preference:
-   * Ask Lit whether a short-lived, scoped key can be minted server-side per reader session — the backend would then never see the symmetric key, preserving the invariant in `KEY-BINDING.md`.
-   * Ship a scoped key with a deliberately small balance and top-up alerts.
-   * Do **not** proxy the call through the backend: the Action's response contains the symmetric key, so the backend would see every book's key.
+### 1.3.2 Decryption Path Is Not Operational Yet (blockers)
+* **Problem Description:** The librarian carve-out in 1.3 is written and tested, but no decryption has ever succeeded in this environment — for librarians, renters or archivists. Four separate things are missing. Verified live on 2026-09-23 against Postgres, Base Sepolia, the Lit API and the gateways.
+* **Already working (so these are not the problem):**
+
+  | Check | State |
+  | --- | --- |
+  | `litEncryptedKeyId`, `litDataToEncryptHash`, `encryptionIv`, `encryptionAuthTag` | Present on all 5 indexed books |
+  | Backend API on `localhost:3001` | Responding |
+  | Librarian staked on-chain | 50 ALEX (`totalLibrarianStake`) |
+  | On-chain upload status | `Pending` for all 5 |
+
+* **Blocker 1 — No decryption Lit Action is registered.** The PKP permits three actions, and all three are *encrypt*: `alexandria-encrypt`, `alexandria-encrypt-v2`, `alexandria-encrypt-v3`. Lit refuses to run a CID the PKP has not permitted, so `Lit.Actions.Decrypt` has never been callable by anyone. Fix:
+  ```bash
+  npm run lit:register                # dry run, free, prints the CID
+  npm run lit:register -- --register  # metered write against account credits
+  ```
+  The CID to permit is `QmcDAyJfwFP29JtufMULaUxo6eTPdqvE6PvPfGJLxtgn6Q`. Needs `LIT_API_KEY` in `.env` (no `VITE_` prefix, so Vite keeps it out of the bundle). Three encrypt actions where one would do is also the "leftovers from testing" case `KEY-BINDING.md` warns about — they can only seal, not open, so it is hygiene rather than a hole, but prune them.
+* **Blocker 2 — The frontend has no Lit configuration.** `src/services/lit.js` reads `VITE_LIT_PKP_ID` and `VITE_LIT_API_KEY`; neither is set, so `pkpId` goes out empty on every call. Both values already exist in `AlexNode/.env` as `LIT_PKP_ID` / `LIT_API_KEY`. Note that `VITE_LIT_API_KEY` **ships in the JavaScript bundle**, readable by anyone, who can then spend credits at $0.01 per Lit Action call and drain the balance real readers need. Mint a *separate* key for the browser rather than reusing the backend's upload key, so it can be rotated without breaking uploads. Do **not** proxy the call through the backend as a workaround: the Action's response carries the symmetric key, so the backend would see every book's key, breaking the invariant in `KEY-BINDING.md`.
+* **Blocker 3 — `VITE_ARWEAVE_GATEWAY` points at a gateway that 404s.** The Reader's *first* step fails, before Lit is ever reached:
+  ```
+  https://arweave.net/{hash}       → 404  not served
+  https://gateway.irys.xyz/{hash}  → 200  reachable
+  VITE_ARWEAVE_GATEWAY             = https://arweave.net   ← the 404 one
+  ```
+  Irys serves its own data items immediately; they take time to appear on arweave.net proper, and these have not. `Reader.jsx` defaults to `gateway.irys.xyz` — the `.env` value overrides that default with the broken one. Fix: `VITE_ARWEAVE_GATEWAY=https://gateway.irys.xyz`.
+* **Blocker 4 — No book the librarian branch can actually be tested on.** Four of the five pending books have **no active stake**, so the branch correctly refuses them. Only `VirusTest5` qualifies (stake active, ~10.7 days of window left). But the sole staked librarian is `0x5F47ecD2…` — the deployer wallet, which also uploaded and staked `VirusTest5`. Opening it with that wallet grants through the **uploader** branch and never executes the librarian code, so the test would pass while proving nothing. That wallet also cannot challenge the book (`challengeUpload` forbids challenging your own upload).
+  * **To test properly:** send 50 ALEX to a second wallet, `stakeAsLibrarian(50)` from it, then open `VirusTest5` with it. Expect `grantedVia: 'librarian_review'` and the review watermark on every page.
+  * Also worth testing the refusal: a wallet with no librarian stake must be denied on the same book.
 
 ---
 

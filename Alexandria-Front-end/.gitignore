@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local environment — secrets and machine-specific config.
+# Tracked .env files end up on GitHub; keep credentials out of the repo.
+.env
+.env.local
+.env.*.local
