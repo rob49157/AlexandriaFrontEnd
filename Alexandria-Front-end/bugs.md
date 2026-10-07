@@ -27,26 +27,31 @@ The Librarian Dashboard is responsible for content curation, upload reviews, qua
   * **ClamAV Security Scan Is Binary:** Virus scanning returns a pass/fail status (clean vs infected), which cannot be mapped to a linear score out of 100 without losing critical safety information.
   * **OCR / NLP Content Quality:** OCR text density and gibberish detection measure text readability and formatting.
   * **The Problem with 0–100 UI Scores:** Merging security scans, SimHash Hamming distance, and OCR quality into a single arbitrary `50/100` score masks the actual reason an upload was flagged and provides zero guidance on what the librarian should actually look for.
-* **Action Items & UX Improvement:**
-  * **[Backend]** Refactor review queue API payload to return categorized audit flags instead of a generic number:
+* **Corrections to the analysis above (found while implementing):**
+  * **No backend ever produced a score.** `aiScore` was a literal in the frontend's `MOCK_QUEUE`. There was nothing to refactor on the backend — the numbers were invented in the browser.
+  * **A malware badge can never fire.** Layer 2 rejects infected or script-carrying PDFs during upload, before encryption and Arweave storage, so a flagged file is never stored and never reaches the queue. Every book here passed. The only fact left worth reporting is whether ClamAV was actually running — it is skipped when the daemon is offline, which is the normal case in dev.
+  * **There is no OCR anywhere in the stack.** `ocrQuality` had no source: OCR and content-quality analysis belong to Tier 2 of the AI validator, which is still notes only (`Alex-AI-Validator/AI_VALIDATOR_NOTES.md`). What does exist is the text pdf-parse extracts at Layer 1, which was used for the fingerprint and then discarded.
+  * **`similarityPct` recreates the original problem.** It is `(64 − distance) / 64`, so two unrelated books score ~50% and everything flagged lands between 95.3% and 100%. The UI reports bits instead.
+* **Bug found and fixed along the way (`pageJoiner`):** pdf-parse appends `-- 3 of 212 --` after every page by default, and Layer 1 counted those markers as extracted text. Consequences: a scan with no OCR got a non-empty fingerprint, so the "no text, skip dedup" branch in `dedup.service.js` never ran; and any two scans with the same page count fingerprinted **identically**, flagging the second as a near-duplicate of the first. Fixed by extracting with `pageJoiner: ''`. Near-duplicate matches were also unsorted, so the stored `nearDuplicateOf` was not necessarily the closest match.
+* **Implemented — Backend (`AlexNode`):**
+  * New columns on `Upload` (all nullable; migration `20260922120000_add_upload_audit_fields`): `nearDuplicateDistance`, `clamavStatus`, `textWordCount`, `textlessPageCount`. The distance is backfilled from the stored fingerprints; the text counts cannot be backfilled, because the file on Arweave is encrypted.
+  * Word counts are measured with SimHash's own `tokenize()`, so the number shown is exactly what the fingerprint was built from.
+  * `GET /api/librarian/review-queue` returns an `audit` object per book. Matched books are named via one extra query for the whole page, and the fingerprint itself is never selected or sent.
     ```json
-    {
-      "securityStatus": "CLEAN", // CLEAN | MALWARE_DETECTED
-      "simHashMatch": {
-        "isDuplicate": true,
-        "matchedBookTitle": "Gray's Anatomy (1918 ed.)",
-        "hammingDistance": 2, // 2 bits difference out of 64
-        "similarityPct": 96.8
-      },
-      "ocrQuality": 42, // Extracted text readability percentage
-      "flags": ["NEAR_DUPLICATE", "LOW_OCR_QUALITY"]
+    "audit": {
+      "flags": ["NEAR_DUPLICATE", "NO_TEXT_LAYER", "MOSTLY_TEXTLESS"],
+      "security":  { "structuralScan": "passed", "clamav": "clean | not_run | unknown" },
+      "duplicate": { "arweaveHash": "…", "title": "Gray's Anatomy", "status": "approved",
+                     "sameUploader": false, "hammingDistance": 2, "threshold": 3 },
+      "text": { "wordCount": 62000, "wordsPerPage": 310, "textlessPages": 0, "pageCount": 200 }
     }
     ```
-  * **[Frontend]** Replace static `X/100` score pills with **Categorized Audit Badges & Risk Breakdown Cards**:
-    * **Malware Badge:** `[🛡️ Clean]` or `[🚨 Virus Flagged]`
-    * **SimHash Duplicate Badge:** `[📄 96.8% Duplicate match with "Book Title"]`
-    * **OCR Quality Badge:** `[🔍 Low Text Quality (42%)]`
-  * **[Frontend Guidance]** Add hover tooltips and an explicit **Audit Summary Callout** telling the librarian *exactly* why the book was queued (e.g., *"Flagged: High similarity to existing catalog item #ar009. Check for duplicate re-upload before approving."*).
+* **Implemented — Frontend:** `src/components/AuditBadges.jsx` renders three chips (Safety, Duplicate, Text) plus a callout naming what to go and look at, with a "What was actually checked?" disclosure (a disclosure, not a hover tooltip, so it works on touch and by keyboard) and a "Use as challenge reason" button that seeds the on-chain reason with the evidence.
+* **Deliberate wording choices:**
+  * A book with no text layer shows **"Duplicate check skipped"**, never "No duplicate found" — the silence of a check that never ran is not a result.
+  * Rows predating the new columns read **"not recorded"**, never "clean".
+  * Unflagged books still get a line, because this queue holds *every* staked book in its window, not only suspicious ones: *"No automated flags. These checks cover file safety and duplicate text only…"*
+* **Still open:** content quality, metadata accuracy, language and category verification remain unchecked — Tier 2 of the AI validator. The `flags` array takes new values without a shape change.
 
 ---
 
@@ -55,9 +60,53 @@ The Librarian Dashboard is responsible for content curation, upload reviews, qua
 * **Root Cause Analysis:**
   * **Frontend:** `LibrarianDashboard.jsx` only shows metadata (Title, Author, Category, Uploader Address, AI Score). There is no "View Book" or "Inspect Content" button.
   * **Encryption Constraints:** Uploaded PDFs are AES-256 encrypted on Arweave. Key access via Lit Protocol currently requires an active on-chain rental (`Rent.sol.isRentalActive()`), which librarians do not possess for unreleased/pending books.
-* **Action Items:**
-  * **[Backend / Lit Protocol]** Configure a **Librarian Access Provision** in Lit Protocol TEE or backend preview service allowing wallets with active librarian stakes (`stakeContract.librarians(address).active == true`) to decrypt a watermarked preview/excerpt.
-  * **[Frontend]** Add an **"Inspect Book" / "Preview Document"** modal to `LibrarianDashboard.jsx` utilizing `PDFViewer.jsx` with librarian-specific watermarking (*"Librarian Review Copy — Wallet 0x..."*).
+* **Correction: a "preview/excerpt" is not possible with key release.** Lit hands over the symmetric key, and that key decrypts the whole file. Rendering only the first N pages is a frontend choice with the full plaintext already in the browser, so it enforces nothing. The only design that produces a real excerpt is extracting unencrypted preview pages at upload time — worth doing later for public previews on BookDetail, but it does nothing for books already uploaded. Librarians therefore get the whole book, watermarked as a review copy.
+* **Implemented — the carve-out lives in the decryption Lit Action** (`src/services/litAction.js`), which is the only thing that actually decides. A third branch grants access when all four of these hold, mirroring what `AlexandriaStake.challengeUpload()` itself requires:
+  * `stake.librarians(caller).active`
+  * `stake.stakes(arweaveHash).active`
+  * `library.getUploadStatus(arweaveHash) == Pending`
+  * `latestBlock.timestamp < stakedAt + CHALLENGE_PERIOD`
+
+  "Now" is the latest block timestamp rather than the enclave clock, so the Action and the contract agree on when the window shuts. Any unreadable contract state denies. Access ends with the window, so this grants no standing access to the catalogue — a librarian cannot open an approved book they hold no rental for.
+* **Why this costs no rental revenue:** a book inside its challenge window is not rentable at all (`Rent.rentBook()` requires Approved), so there was never a rental for a librarian to buy in good faith.
+* **Implemented — supporting changes:**
+  * The Action returns `grantedVia` (`rental` | `uploader` | `librarian_review`), which selects the watermark: *"LIBRARIAN REVIEW COPY — not for distribution | Librarian: 0x… | Opened: …"* on every page, plus the diagonal ghost mark.
+  * `GET /api/rental/decrypt-params` no longer 403s an eligible librarian (`isActiveLibrarian()` in `blockchain.service.js`). Still defense-in-depth only — the address is an unsigned URL parameter, as that file documents.
+  * `Reader.jsx` shows a review banner instead of the rental countdown and skips the rental-expiry redirect, which a review copy never had.
+  * `LibrarianDashboard.jsx` gains an **Inspect** action per queue row, linking to `/read/:arweaveHash`.
+  * The Action source, its tests and the CID registration script all live in **this** repo, because the browser is what executes it — Lit hashes the exact bytes the frontend sends. It previously existed as two hand-maintained copies (one here, one in `AlexNode/services/litAction.js`), where a one-character drift would have failed every decryption with an opaque permission error. The backend copy is now deleted; the backend never ran it.
+  * `tests/decryptionAction.test.js` (run with `npm run test:lit-action`) **executes the shipped Action source** in a sandbox with stubbed Lit/ethers globals. It previously reimplemented the logic in the test, so it could pass while the real Action was broken. 23 cases, seven of them refusals of the review grant. Plain Node, no test framework — the same hand-rolled style as the backend suites.
+
+---
+
+### 1.3.2 Decryption Path Is Not Operational Yet (blockers)
+* **Problem Description:** The librarian carve-out in 1.3 is written and tested, but no decryption has ever succeeded in this environment — for librarians, renters or archivists. Four separate things are missing. Verified live on 2026-09-23 against Postgres, Base Sepolia, the Lit API and the gateways.
+* **Already working (so these are not the problem):**
+
+  | Check | State |
+  | --- | --- |
+  | `litEncryptedKeyId`, `litDataToEncryptHash`, `encryptionIv`, `encryptionAuthTag` | Present on all 5 indexed books |
+  | Backend API on `localhost:3001` | Responding |
+  | Librarian staked on-chain | 50 ALEX (`totalLibrarianStake`) |
+  | On-chain upload status | `Pending` for all 5 |
+
+* **Blocker 1 — No decryption Lit Action is registered.** The PKP permits three actions, and all three are *encrypt*: `alexandria-encrypt`, `alexandria-encrypt-v2`, `alexandria-encrypt-v3`. Lit refuses to run a CID the PKP has not permitted, so `Lit.Actions.Decrypt` has never been callable by anyone. Fix:
+  ```bash
+  npm run lit:register                # dry run, free, prints the CID
+  npm run lit:register -- --register  # metered write against account credits
+  ```
+  The CID to permit is `QmcDAyJfwFP29JtufMULaUxo6eTPdqvE6PvPfGJLxtgn6Q`. Needs `LIT_API_KEY` in `.env` (no `VITE_` prefix, so Vite keeps it out of the bundle). Three encrypt actions where one would do is also the "leftovers from testing" case `KEY-BINDING.md` warns about — they can only seal, not open, so it is hygiene rather than a hole, but prune them.
+* **Blocker 2 — The frontend has no Lit configuration.** `src/services/lit.js` reads `VITE_LIT_PKP_ID` and `VITE_LIT_API_KEY`; neither is set, so `pkpId` goes out empty on every call. Both values already exist in `AlexNode/.env` as `LIT_PKP_ID` / `LIT_API_KEY`. Note that `VITE_LIT_API_KEY` **ships in the JavaScript bundle**, readable by anyone, who can then spend credits at $0.01 per Lit Action call and drain the balance real readers need. Mint a *separate* key for the browser rather than reusing the backend's upload key, so it can be rotated without breaking uploads. Do **not** proxy the call through the backend as a workaround: the Action's response carries the symmetric key, so the backend would see every book's key, breaking the invariant in `KEY-BINDING.md`.
+* **Blocker 3 — `VITE_ARWEAVE_GATEWAY` points at a gateway that 404s.** The Reader's *first* step fails, before Lit is ever reached:
+  ```
+  https://arweave.net/{hash}       → 404  not served
+  https://gateway.irys.xyz/{hash}  → 200  reachable
+  VITE_ARWEAVE_GATEWAY             = https://arweave.net   ← the 404 one
+  ```
+  Irys serves its own data items immediately; they take time to appear on arweave.net proper, and these have not. `Reader.jsx` defaults to `gateway.irys.xyz` — the `.env` value overrides that default with the broken one. Fix: `VITE_ARWEAVE_GATEWAY=https://gateway.irys.xyz`.
+* **Blocker 4 — No book the librarian branch can actually be tested on.** Four of the five pending books have **no active stake**, so the branch correctly refuses them. Only `VirusTest5` qualifies (stake active, ~10.7 days of window left). But the sole staked librarian is `0x5F47ecD2…` — the deployer wallet, which also uploaded and staked `VirusTest5`. Opening it with that wallet grants through the **uploader** branch and never executes the librarian code, so the test would pass while proving nothing. That wallet also cannot challenge the book (`challengeUpload` forbids challenging your own upload).
+  * **To test properly:** send 50 ALEX to a second wallet, `stakeAsLibrarian(50)` from it, then open `VirusTest5` with it. Expect `grantedVia: 'librarian_review'` and the review watermark on every page.
+  * Also worth testing the refusal: a wallet with no librarian stake must be denied on the same book.
 
 ---
 
