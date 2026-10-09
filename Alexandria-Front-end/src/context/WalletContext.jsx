@@ -1,36 +1,11 @@
-import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react'
+import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { BrowserProvider, JsonRpcSigner } from 'ethers'
+import { getWallet, getWallets } from '../utils/walletDiscovery'
 
 const BASE_SEPOLIA_CHAIN_ID = 84532
 const BASE_SEPOLIA_HEX = '0x14a34'
 
 const WalletContext = createContext(null)
-
-// Resolve the injected EIP-1193 provider for a specific wallet.
-// Browsers with several wallets installed expose them under window.ethereum.providers.
-function resolveProvider(type) {
-  const eth = window.ethereum
-  if (!eth) return null
-
-  const providers = eth.providers ?? [eth]
-
-  if (type === 'metamask') {
-    // Exclude wallets that spoof isMetaMask (Rabby, Brave, etc.)
-    return providers.find(p => p.isMetaMask && !p.isRabby && !p.isBraveWallet && !p.isCoinbaseWallet && !p.isFrame) ?? null
-  }
-  if (type === 'rabby') {
-    return providers.find(p => p.isRabby) ?? (eth.isRabby ? eth : null)
-  }
-  if (type === 'coinbase') {
-    return (
-      window.coinbaseWalletExtension ??
-      providers.find(p => p.isCoinbaseWallet) ??
-      null
-    )
-  }
-  // injected — whatever is available
-  return eth
-}
 
 // Wallet errors arrive wrapped by ethers, so the provider's own code sits on
 // err.error / err.info.error rather than err.code.
@@ -49,14 +24,21 @@ export function WalletProvider({ children }) {
   const [address,          setAddress]          = useState(null)
   const [provider,         setProvider]         = useState(null)
   const [rawProvider,      setRawProvider]      = useState(null) // injected EIP-1193 provider we connected through
-  const [signer,           setSigner]           = useState(null)
   const [chainId,          setChainId]          = useState(null)
-  const [walletType,       setWalletType]       = useState(null) // 'metamask' | 'rabby' | 'coinbase' | 'injected' | null
+  const [wallet,           setWallet]           = useState(null) // { id, name, icon } of the connected wallet
   const [connecting,       setConnecting]       = useState(false)
   const [error,            setError]            = useState(null)
   const [isCorrectNetwork, setIsCorrectNetwork] = useState(false)
 
   const inFlight = useRef(false) // guards against overlapping connect requests
+
+  // Derived so it always matches the current account and network.
+  // Built from the address directly: p.getSigner() would re-check eth_accounts
+  // and fire a duplicate eth_requestAccounts if the wallet is still unlocking.
+  const signer = useMemo(
+    () => (provider && address ? new JsonRpcSigner(provider, address) : null),
+    [provider, address],
+  )
 
   // ── Network check ────────────────────────────────────────────────
   const checkNetwork = useCallback((id) => {
@@ -70,9 +52,8 @@ export function WalletProvider({ children }) {
     setAddress(null)
     setProvider(null)
     setRawProvider(null)
-    setSigner(null)
     setChainId(null)
-    setWalletType(null)
+    setWallet(null)
     setIsCorrectNetwork(false)
     setError(null)
   }, [])
@@ -109,7 +90,8 @@ export function WalletProvider({ children }) {
   }, [rawProvider])
 
   // ── Connect ──────────────────────────────────────────────────────
-  const connectWith = useCallback(async (type) => {
+  // walletId is the EIP-6963 rdns (e.g. 'io.metamask'), or LEGACY_WALLET_ID
+  const connectWith = useCallback(async (walletId) => {
     // A second eth_requestAccounts while the first is still open makes the
     // wallet reject with -32002 / "Already processing unlock", so only ever
     // allow one connection attempt in flight.
@@ -118,7 +100,8 @@ export function WalletProvider({ children }) {
       return false
     }
 
-    const raw = resolveProvider(type)
+    const found = getWallet(walletId)
+    const raw = found?.provider
     if (!raw) {
       setError('Wallet not found. Please install it and try again.')
       return false
@@ -135,19 +118,13 @@ export function WalletProvider({ children }) {
       if (!addr) throw new Error('No accounts returned. Unlock your wallet and try again.')
 
       const net = await p.getNetwork()
-      // Build the signer from the address we already have. p.getSigner() would
-      // re-check eth_accounts and fire a duplicate eth_requestAccounts if the
-      // wallet is still finishing its unlock.
-      const s = new JsonRpcSigner(p, addr)
-
       const netId = Number(net.chainId)
 
       setProvider(p)
       setRawProvider(raw)
-      setSigner(s)
       setAddress(addr)
       setChainId(netId)
-      setWalletType(type)
+      setWallet({ id: found.id, name: found.name, icon: found.icon })
       checkNetwork(netId)
       return true
     } catch (err) {
@@ -159,13 +136,17 @@ export function WalletProvider({ children }) {
     }
   }, [checkNetwork])
 
-  const connect = useCallback(() => connectWith('injected'), [connectWith])
+  // Connect to the first discovered wallet
+  const connect = useCallback(() => connectWith(getWallets()[0]?.id), [connectWith])
 
   // ── Listen for account & network changes ─────────────────────────
   useEffect(() => {
-    const eth = rawProvider ?? window.ethereum
-    if (typeof eth?.on !== 'function') return
+    // Only listen to the wallet we connected through. Falling back to
+    // window.ethereum would pick up events from whichever wallet owns that
+    // global (e.g. Rabby) even while disconnected or connected to MetaMask.
+    if (typeof rawProvider?.on !== 'function') return
 
+    // The derived signer follows the new address automatically
     const onAccountsChanged = (accounts) => {
       if (!accounts || accounts.length === 0) {
         disconnect()
@@ -174,24 +155,27 @@ export function WalletProvider({ children }) {
       }
     }
 
+    // ethers' BrowserProvider is bound to the network it detected and throws
+    // "network changed" afterwards, so swap in a fresh one instead of
+    // reloading the page (which dropped the connection).
     const onChainChanged = (newChainId) => {
-      const id = parseInt(newChainId, 16)
+      const id = Number(newChainId)
+      setProvider(new BrowserProvider(rawProvider))
       setChainId(id)
       checkNetwork(id)
-      window.location.reload()
     }
 
-    eth.on('accountsChanged', onAccountsChanged)
-    eth.on('chainChanged', onChainChanged)
+    rawProvider.on('accountsChanged', onAccountsChanged)
+    rawProvider.on('chainChanged', onChainChanged)
     return () => {
-      eth.removeListener('accountsChanged', onAccountsChanged)
-      eth.removeListener('chainChanged', onChainChanged)
+      rawProvider.removeListener('accountsChanged', onAccountsChanged)
+      rawProvider.removeListener('chainChanged', onChainChanged)
     }
   }, [rawProvider, disconnect, checkNetwork])
 
   return (
     <WalletContext.Provider value={{
-      address, provider, signer, chainId, walletType,
+      address, provider, signer, chainId, wallet,
       connecting, error, isCorrectNetwork,
       connect, connectWith, disconnect, switchToBaseSepolia,
     }}>
