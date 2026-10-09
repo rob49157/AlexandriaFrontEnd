@@ -3,15 +3,8 @@ import { createPortal } from 'react-dom'
 import { useWallet } from '../context/WalletContext'
 import '../styles/WalletModal.css'
 
-const WALLET_LABELS = {
-  metamask: 'MetaMask',
-  rabby:    'Rabby',
-  coinbase: 'Coinbase Wallet',
-  injected: 'Browser Wallet',
-}
-
 export default function WalletInfoModal({ onClose, onSwitchWallet }) {
-  const { address, chainId, isCorrectNetwork, walletType, disconnect, switchToBaseSepolia } = useWallet()
+  const { address, chainId, isCorrectNetwork, wallet, disconnect, switchToBaseSepolia } = useWallet()
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
@@ -46,8 +39,8 @@ export default function WalletInfoModal({ onClose, onSwitchWallet }) {
           <button className="wmodal__close" onClick={onClose} aria-label="Close">✕</button>
         </div>
 
-        {walletType && (
-          <p className="wmodal__wallet-type-label">{WALLET_LABELS[walletType] ?? walletType}</p>
+        {wallet && (
+          <p className="wmodal__wallet-type-label">{wallet.name}</p>
         )}
 
         <div className="wmodal__address-row">
