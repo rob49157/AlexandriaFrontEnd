@@ -115,6 +115,17 @@ button.wmodal__wallet-item:disabled {
   width: 40px;
   height: 40px;
   flex-shrink: 0;
+  border-radius: 10px;
+  object-fit: contain;
+}
+
+.wmodal__wallet-icon--fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  font-weight: 600;
 }
 
 .wmodal__wallet-text {
