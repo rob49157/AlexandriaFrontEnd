@@ -1,10 +1,10 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { parseUnits } from 'ethers'
 import { useWallet } from '../context/WalletContext'
 import WalletSelectModal from '../components/WalletSelectModal'
 import { useContracts } from '../hooks/useContracts'
-import { uploadPdf } from '../services/api'
+import { uploadPdf, getStorageProgress, retryRegistration } from '../services/api'
 import { ADDRESSES } from '../config/contracts'
 import '../styles/Upload.css'
 
@@ -26,6 +26,33 @@ const STAKE_STEPS = [
   { label: `Approve ${STAKE_AMOUNT} $ALEX spend` },
   { label: 'Deposit stake on Base Sepolia'        },
 ]
+
+// The backend answers the upload with 202: a background worker stores the book on
+// Arweave (header mined → copies on 2 independent nodes → 16 confirmations → both
+// copies verified), then registers it on-chain. Staking is only possible after
+// registration, because stake.stake() requires getUploader(hash) == msg.sender.
+const STORAGE_POLL_MS = 20_000
+// The archivist may close the tab during the ~25–40 min of storage. Remember the
+// hash so this page picks the upload back up. Per browser, best effort.
+const PENDING_KEY = 'alexandria:pendingUpload'
+const rememberPending = (hash) => { try { localStorage.setItem(PENDING_KEY, hash) } catch { /* private mode */ } }
+const forgetPending   = ()     => { try { localStorage.removeItem(PENDING_KEY) } catch { /* private mode */ } }
+const recallPending   = ()     => { try { return localStorage.getItem(PENDING_KEY) } catch { return null } }
+
+function storageSteps(p) {
+  const copies = p?.copiesComplete ?? 0
+  const needCopies = p?.copiesRequired ?? 2
+  const confs = p?.confirmations ?? 0
+  const needConfs = p?.confirmationsRequired ?? 16
+  const stored = p?.stored === true
+  return [
+    { label: 'Transaction mined on Arweave', done: Boolean(p?.mined) },
+    { label: `Copied to ${needCopies} independent nodes (${Math.min(copies, needCopies)}/${needCopies})`, done: copies >= needCopies },
+    { label: `Confirmations (${Math.min(confs, needConfs)}/${needConfs})`, done: stored || confs >= needConfs },
+    { label: 'Copies verified · stored permanently', done: stored },
+    { label: 'Registered on-chain', done: p?.status === 'pending' || ['approved', 'challenged', 'rejected'].includes(p?.status) },
+  ]
+}
 
 function formatBytes(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
@@ -49,10 +76,13 @@ export default function Upload() {
   const [errors,     setErrors]     = useState({})
   const [isDragOver, setIsDragOver] = useState(false)
 
-  // Flow state
-  const [step,         setStep]         = useState(1)       // 1 | 2 | 3
-  const [arweaveHash,  setArweaveHash]  = useState(null)
-  const [registration, setRegistration] = useState(null)
+  // Flow state. An upload still being stored resumes at step 2 (see PENDING_KEY).
+  const [resumedHash]                   = useState(() => recallPending())
+  const [step,         setStep]         = useState(resumedHash ? 2 : 1) // 1 | 2 | 3
+  const [arweaveHash,  setArweaveHash]  = useState(resumedHash)
+  const [storage,      setStorage]      = useState(resumedHash ? { status: 'pending_confirmation' } : null) // GET /storage/:hash progress
+  const [storageErr,   setStorageErr]   = useState(null)    // transient polling error
+  const [registerBusy, setRegisterBusy] = useState(false)
   const [uploadState,  setUploadState]  = useState('idle')  // idle | busy | error
   const [uploadError,  setUploadError]  = useState(null)
   const [stakeStep,    setStakeStep]    = useState(0)       // 0–2 completed
@@ -109,13 +139,48 @@ export default function Upload() {
       fd.append('walletAddress', address)
 
       const result = await uploadPdf(fd)
+      rememberPending(result.arweaveHash)
       setArweaveHash(result.arweaveHash)
-      setRegistration(result.registration)
+      setStorage({ status: result.status, stored: false, mined: false })
       setUploadState('idle')
       setStep(2)
     } catch (err) {
       setUploadState('error')
       setUploadError(err.message || 'Upload failed. Please try again.')
+    }
+  }
+
+  // ── Step 2a: follow storage until the book is registered ──
+  const storageStatus = storage?.status
+  const storageDone   = storageStatus && storageStatus !== 'pending_confirmation'
+  useEffect(() => {
+    if (step !== 2 || !arweaveHash || storageDone) return undefined
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const p = await getStorageProgress(arweaveHash)
+        if (!cancelled) { setStorage(p); setStorageErr(null) }
+      } catch (err) {
+        // A failed poll is not a failed upload: the worker keeps going server-side.
+        if (!cancelled) setStorageErr(err.message)
+      }
+    }
+    poll()
+    const id = setInterval(poll, STORAGE_POLL_MS)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [step, arweaveHash, storageDone])
+
+  // Stored, but the backend could not register it (e.g. registrar out of gas).
+  const handleRetryRegistration = async () => {
+    setRegisterBusy(true)
+    setStorageErr(null)
+    try {
+      const r = await retryRegistration(arweaveHash)
+      setStorage(s => ({ ...s, status: r.status || 'pending' }))
+    } catch (err) {
+      setStorageErr(err.message || 'Registration failed. Please try again later.')
+    } finally {
+      setRegisterBusy(false)
     }
   }
 
@@ -144,6 +209,7 @@ export default function Upload() {
       const receipt = await stakeTx.wait()
 
       setStakeTxHash(receipt?.hash || stakeTx.hash)
+      forgetPending()
       setStakeState('done')
       setStep(3)
     } catch (err) {
@@ -154,12 +220,14 @@ export default function Upload() {
 
   // ── Reset ─────────────────────────────────────────
   const handleReset = () => {
+    forgetPending()
     setFile(null)
     setForm({ title: '', author: '', category: '', description: '' })
     setErrors({})
     setStep(1)
     setArweaveHash(null)
-    setRegistration(null)
+    setStorage(null)
+    setStorageErr(null)
     setUploadState('idle')
     setUploadError(null)
     setStakeStep(0)
@@ -342,7 +410,7 @@ export default function Upload() {
             {uploadState === 'busy' ? (
               <div className="upload__pending">
                 <Spinner />
-                Validating · encrypting with AES-256 · sealing with Lit Protocol · storing on Arweave…
+                Validating · encrypting with AES-256 · sealing with Lit Protocol · posting to Arweave…
               </div>
             ) : (
               <button className="upload__cta" onClick={handleUpload}>
@@ -356,14 +424,84 @@ export default function Upload() {
           </div>
         )}
 
-        {/* ── Step 2: Stake on-chain ── */}
-        {step === 2 && (
+        {/* ── Step 2a: Storing on Arweave (after the 202) ── */}
+        {step === 2 && storageStatus !== 'pending' && storageStatus !== 'storage_failed' && (
           <div className="upload__card">
             <div className="upload__result-badge">
               <span className="upload__result-dot" />
               <div>
                 <p className="upload__result-label">
-                  {registration?.registered ? 'Uploaded to Arweave & Registered On-Chain' : 'Uploaded to Arweave'}
+                  {storageStatus === 'pending_stake' ? 'Stored on Arweave · Registration pending' : 'Storing on Arweave'}
+                </p>
+                <code className="upload__result-hash">{arweaveHash}</code>
+              </div>
+            </div>
+
+            <div className="upload__stake-info">
+              <p>
+                Your encrypted book has been accepted. Alexandria is now storing it
+                permanently: it waits for the network to confirm it and checks that
+                two independent nodes hold a copy before registering it on-chain.
+              </p>
+              <p>
+                This usually takes 25–40 minutes. You can leave this page: storage
+                continues on the server, and this page picks it back up when you return.
+              </p>
+            </div>
+
+            <div className="upload__tx-list">
+              {storageSteps(storage).map(({ label, done }, i, all) => {
+                const active = !done && (i === 0 || all[i - 1].done)
+                return (
+                  <div
+                    key={label}
+                    className={`upload__tx-item${done ? ' upload__tx-item--done' : active ? ' upload__tx-item--active' : ''}`}
+                  >
+                    <span className="upload__tx-indicator">
+                      {done ? '✓' : active ? <Spinner small /> : i + 1}
+                    </span>
+                    <span className="upload__tx-label">{label}</span>
+                  </div>
+                )
+              })}
+            </div>
+
+            {storageStatus === 'pending_stake' && (
+              registerBusy ? (
+                <div className="upload__pending"><Spinner /> Registering on Base Sepolia…</div>
+              ) : (
+                <button className="upload__cta" onClick={handleRetryRegistration}>
+                  Retry On-Chain Registration →
+                </button>
+              )
+            )}
+
+            {storageErr && <div className="upload__err-box">{storageErr}</div>}
+          </div>
+        )}
+
+        {/* ── Step 2b: Storage failed for good ── */}
+        {step === 2 && storageStatus === 'storage_failed' && (
+          <div className="upload__card">
+            <div className="upload__err-box">
+              Arweave never confirmed this upload, so it was not stored and nothing
+              was registered. Please upload the file again.
+              {storage?.error && <><br /><small>{storage.error}</small></>}
+            </div>
+            <button className="upload__cta" onClick={handleReset}>
+              Upload Again
+            </button>
+          </div>
+        )}
+
+        {/* ── Step 2c: Stake on-chain (only once registered) ── */}
+        {step === 2 && storageStatus === 'pending' && (
+          <div className="upload__card">
+            <div className="upload__result-badge">
+              <span className="upload__result-dot" />
+              <div>
+                <p className="upload__result-label">
+                  Stored on Arweave & Registered On-Chain
                 </p>
                 <code className="upload__result-hash">{arweaveHash}</code>
               </div>

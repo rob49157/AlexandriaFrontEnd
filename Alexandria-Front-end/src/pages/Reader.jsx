@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import * as pdfjsLib from 'pdfjs-dist'
 import { PDFDocument, rgb, StandardFonts, degrees } from 'pdf-lib'
 import { useWallet } from '../context/WalletContext'
-import { getUpload, getDecryptParams } from '../services/api'
+import { getUpload, getDecryptParams, getEncryptedBook } from '../services/api'
 import { unwrapKeyFromLit } from '../services/lit'
 import { decryptPdfInBrowser, zeroMemory } from '../services/decryption'
 import { MOCK_BOOKS } from '../data/mockBooks'
@@ -13,8 +13,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
   import.meta.url,
 ).toString()
-
-const ARWEAVE_GATEWAY = import.meta.env.VITE_ARWEAVE_GATEWAY || 'https://gateway.irys.xyz'
 
 // ── Watermarking ──────────────────────────────────────────────────
 // One symmetric key protects a book for everyone who ever reads it, so if a
@@ -50,7 +48,7 @@ async function addWatermarks(pdfBytes, { walletAddress, rentalDate, expiryDate, 
 
 // ── Load steps ────────────────────────────────────────────────────
 const STEPS = [
-  { key: 'fetching',     label: 'Downloading encrypted PDF from Arweave'       },
+  { key: 'fetching',     label: 'Downloading encrypted PDF from Arweave nodes' },
   { key: 'params',       label: 'Retrieving decryption envelope from backend' },
   { key: 'lit',          label: 'Verifying on-chain rental & unsealing via Lit' },
   { key: 'decrypting',   label: 'Decrypting PDF in browser memory (WebCrypto)' },
@@ -120,13 +118,10 @@ export default function Reader() {
           if (!cancelled && mock) setBookTitle(mock.title)
         })
 
-      // Step 1: Download encrypted PDF from Arweave / Irys
+      // Step 1: Download the encrypted PDF. The backend reads it from raw Arweave
+      // nodes and proof-checks every chunk; no third-party gateway is involved.
       setLoadPhase('fetching')
-      const gatewayRes = await fetch(`${ARWEAVE_GATEWAY}/${arweaveHash}`)
-      if (!gatewayRes.ok) {
-        throw new Error(`Failed to download encrypted PDF from Arweave gateway (${gatewayRes.status})`)
-      }
-      const encryptedBuffer = await gatewayRes.arrayBuffer()
+      const encryptedBuffer = await getEncryptedBook(arweaveHash)
       if (cancelled) return
       setDoneSteps(s => [...s, 'fetching'])
 

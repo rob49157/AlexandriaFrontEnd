@@ -32,7 +32,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener('eip6963:announceProvider', onAnnounce)
   // Ask wallets that loaded before this listener existed to announce again
   window.dispatchEvent(new Event('eip6963:requestProvider'))
-
+}
 
 // Fallback for older wallets that only inject window.ethereum.
 // Built once so the snapshot stays referentially stable.
