@@ -17,6 +17,10 @@ const CATEGORY_STYLE = {
 }
 
 const STATUS_CONFIG = {
+  // Before pending_stake: the storage worker is confirming the Arweave upload
+  // (~25–40 min), or it was never mined and must be uploaded again.
+  pending_confirmation: { label: 'Storing on Arweave', color: '#4cb8c4', bg: 'rgba(76, 184, 196, 0.12)' },
+  storage_failed:       { label: 'Storage Failed',     color: '#e06060', bg: 'rgba(224, 96, 96, 0.12)'  },
   pending_stake: { label: 'Pending Stake', color: '#eab308', bg: 'rgba(234, 179, 8, 0.12)'   },
   pending:       { label: 'Pending Review',color: '#5b8dee', bg: 'rgba(91, 141, 238, 0.12)'  },
   approved:      { label: 'Approved',      color: '#4caf7a', bg: 'rgba(76, 175, 122, 0.12)'  },

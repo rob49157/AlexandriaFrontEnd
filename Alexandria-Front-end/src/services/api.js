@@ -103,6 +103,42 @@ export async function uploadPdf(formData) {
 }
 
 /**
+ * Storage progress of one upload. POST /upload answers 202: the book is stored on
+ * Arweave by a background worker (mined → 2 verified copies → 16 confirmations,
+ * ~25–40 min), then registered on-chain. Poll this until `status` leaves
+ * 'pending_confirmation'.
+ *
+ * @param {string} arweaveHash
+ * @returns {Promise<{ status: string, stored: boolean, mined: boolean, confirmations: number|null,
+ *   confirmationsRequired: number, copiesComplete: number, copiesRequired: number,
+ *   verifiedCopies: number, error: string|null }>}
+ */
+export async function getStorageProgress(arweaveHash) {
+  return fetchJson(`/storage/${encodeURIComponent(arweaveHash)}`);
+}
+
+/**
+ * Download a book's ciphertext. Served by the backend, which reads it from raw
+ * Arweave nodes and proof-checks every chunk: raw nodes are plain HTTP, which this
+ * HTTPS app cannot fetch directly, and no third-party gateway is used.
+ * The bytes are useless without the key only the Lit Action releases.
+ *
+ * @param {string} arweaveHash
+ * @returns {Promise<ArrayBuffer>}
+ */
+export async function getEncryptedBook(arweaveHash) {
+  const response = await fetch(`${API_URL}/storage/${encodeURIComponent(arweaveHash)}/data`);
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    const error = new Error(data?.message || `Could not download the encrypted book (${response.status})`);
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
+  return response.arrayBuffer();
+}
+
+/**
  * Retry on-chain registration for an upload
  * @param {string} arweaveHash
  */
