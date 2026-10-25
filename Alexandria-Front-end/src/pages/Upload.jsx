@@ -1,10 +1,12 @@
 import { useState, useRef, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { parseUnits } from 'ethers'
+import { getAddress, parseUnits } from 'ethers'
 import { useWallet } from '../context/WalletContext'
 import WalletSelectModal from '../components/WalletSelectModal'
 import { useContracts } from '../hooks/useContracts'
-import { uploadPdf, getStorageProgress, retryRegistration } from '../services/api'
+import { uploadPdf, getStorageProgress, retryRegistration, getUploadQuota } from '../services/api'
+import { buildUploadMessage, randomNonce, sha256Hex, toIsoSeconds, UPLOAD_WINDOW_SECONDS } from '../services/unlockMessage'
+import { isUserRejection } from '../utils/walletErrors'
 import { ADDRESSES } from '../config/contracts'
 import '../styles/Upload.css'
 
@@ -64,7 +66,7 @@ function Spinner({ small }) {
 }
 
 export default function Upload() {
-  const { address, isCorrectNetwork, connecting, error: walletError, switchToBaseSepolia } = useWallet()
+  const { address, signer, isCorrectNetwork, connecting, error: walletError, switchToBaseSepolia } = useWallet()
   const { tokenContract, stakeContract } = useContracts()
   const fileInputRef = useRef(null)
 
@@ -84,7 +86,12 @@ export default function Upload() {
   const [storageErr,   setStorageErr]   = useState(null)    // transient polling error
   const [registerBusy, setRegisterBusy] = useState(false)
   const [uploadState,  setUploadState]  = useState('idle')  // idle | busy | error
+  const [uploadPhase,  setUploadPhase]  = useState(null)    // signing | uploading, while busy
   const [uploadError,  setUploadError]  = useState(null)
+  // Upload limits for this wallet + the shared storage budget (GET /upload/quota/:address)
+  const [quota,        setQuota]        = useState(null)
+  const [quotaError,   setQuotaError]   = useState(null)
+  const [quotaTick,    setQuotaTick]    = useState(0)       // bump to re-fetch
   const [stakeStep,    setStakeStep]    = useState(0)       // 0–2 completed
   const [stakeState,   setStakeState]   = useState('idle')  // idle | busy | done | error
   const [stakeError,   setStakeError]   = useState(null)
@@ -120,16 +127,64 @@ export default function Upload() {
     return e
   }
 
+  // ── Upload limits ─────────────────────────────────
+  // Shown before a file is picked, so an archivist at a limit learns why up front
+  // instead of after uploading. The backend enforces the same rules either way.
+  useEffect(() => {
+    if (step !== 1 || !address) return undefined
+    let cancelled = false
+    getUploadQuota(address)
+      .then(q => { if (!cancelled) { setQuota(q); setQuotaError(null) } })
+      .catch(err => { if (!cancelled) setQuotaError(err.message || 'Could not load your upload limits.') })
+    return () => { cancelled = true }
+  }, [step, address, quotaTick])
+
+  const blockedByQuota = Boolean(address && quota && !quota.canUpload)
+
+  // Pick an earlier upload back up: follow its storage, or stake it.
+  const resumeUpload = (book) => {
+    rememberPending(book.arweaveHash)
+    setArweaveHash(book.arweaveHash)
+    setStorage({ status: book.status })
+    setStorageErr(null)
+    setStep(2)
+  }
+
   // ── Step 1: Upload to backend ─────────────────────
   const handleUpload = async () => {
     const errs = validate()
     if (Object.keys(errs).length) { setErrors(errs); return }
-    if (!address)          { setShowWalletSelect(true); return }
-    if (!isCorrectNetwork) { switchToBaseSepolia();     return }
+    if (!address || !signer) { setShowWalletSelect(true); return }
+    if (!isCorrectNetwork)   { switchToBaseSepolia();     return }
+    if (blockedByQuota)      return // the panel above says why
 
     setUploadState('busy')
+    setUploadPhase('signing')
     setUploadError(null)
     try {
+      // The wallet signs for this exact file. The backend refuses an upload whose
+      // bytes do not match, and every per-wallet limit relies on this proof.
+      const pdfHash = await sha256Hex(new Uint8Array(await file.arrayBuffer()))
+      const issued  = Math.floor(Date.now() / 1000)
+      const authMessage = buildUploadMessage({
+        domain: window.location.host,
+        uri: window.location.origin,
+        address: getAddress(address),
+        nonce: randomNonce(),
+        issuedAt: toIsoSeconds(issued),
+        expirationTime: toIsoSeconds(issued + UPLOAD_WINDOW_SECONDS),
+        pdfHash,
+      })
+      let authSignature
+      try {
+        authSignature = await signer.signMessage(authMessage)
+      } catch (err) {
+        throw new Error(isUserRejection(err)
+          ? 'You declined the signature, so nothing was uploaded.'
+          : `Your wallet could not sign: ${err?.shortMessage || err?.message || 'unknown error'}`)
+      }
+
+      setUploadPhase('uploading')
       const fd = new FormData()
       fd.append('file', file)
       fd.append('title', form.title.trim())
@@ -137,6 +192,8 @@ export default function Upload() {
       fd.append('category', form.category)
       fd.append('description', form.description.trim())
       fd.append('walletAddress', address)
+      fd.append('authMessage', authMessage)
+      fd.append('authSignature', authSignature)
 
       const result = await uploadPdf(fd)
       rememberPending(result.arweaveHash)
@@ -147,6 +204,10 @@ export default function Upload() {
     } catch (err) {
       setUploadState('error')
       setUploadError(err.message || 'Upload failed. Please try again.')
+      // A limit hit since the panel last loaded: show the current numbers.
+      if (err?.data?.stage === 'quota' || err?.data?.reason === 'upload_budget_exhausted') setQuotaTick(t => t + 1)
+    } finally {
+      setUploadPhase(null)
     }
   }
 
@@ -295,6 +356,45 @@ export default function Upload() {
               </div>
             )}
 
+            {/* Upload limits — before the form, so nobody fills it in for nothing */}
+            {address && quota && (
+              <div className="upload__quota">
+                <p className="upload__quota-title">Your upload limits</p>
+                <div className="upload__quota-row">
+                  <span>Uploads waiting for your stake</span>
+                  <strong>{quota.awaitingStake.count} of {quota.awaitingStake.max}</strong>
+                </div>
+                {quota.awaitingStake.books.length > 0 && (
+                  <ul className="upload__quota-books">
+                    {quota.awaitingStake.books.map(book => (
+                      <li key={book.arweaveHash}>
+                        <span className="upload__quota-book">{book.title}</span>
+                        <button className="upload__quota-resume" onClick={() => resumeUpload(book)}>
+                          {book.status === 'pending' ? 'Stake now →' : 'View progress →'}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="upload__quota-row">
+                  <span>Uploads in the last 24 hours</span>
+                  <strong>{quota.last24h.count} of {quota.last24h.max}</strong>
+                </div>
+                <div className="upload__quota-row">
+                  <span>Today&apos;s storage budget, shared by all archivists</span>
+                  <strong>{quota.budget.percentUsed}% used</strong>
+                </div>
+                <p className="upload__quota-hint">
+                  Alexandria pays for permanent storage up front. You can have
+                  up to {quota.awaitingStake.max} uploads waiting for your {STAKE_AMOUNT} $ALEX
+                  stake at a time; staking one frees its slot, and you get the stake
+                  back after the {STAKE_DAYS}-day review.
+                </p>
+              </div>
+            )}
+            {blockedByQuota && <div className="upload__err-box">{quota.message}</div>}
+            {address && quotaError && <div className="upload__err-box">{quotaError}</div>}
+
             {/* PDF file */}
             <div className="upload__field">
               <label className="upload__label">PDF File <span className="upload__required">*</span></label>
@@ -410,10 +510,12 @@ export default function Upload() {
             {uploadState === 'busy' ? (
               <div className="upload__pending">
                 <Spinner />
-                Validating · encrypting with AES-256 · sealing with Lit Protocol · posting to Arweave…
+                {uploadPhase === 'signing'
+                  ? 'Sign the upload in your wallet to prove the file is yours…'
+                  : 'Validating · encrypting with AES-256 · sealing with Lit Protocol · posting to Arweave…'}
               </div>
             ) : (
-              <button className="upload__cta" onClick={handleUpload}>
+              <button className="upload__cta" onClick={handleUpload} disabled={blockedByQuota}>
                 Upload & Continue →
               </button>
             )}

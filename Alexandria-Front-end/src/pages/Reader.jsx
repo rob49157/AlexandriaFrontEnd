@@ -4,8 +4,9 @@ import * as pdfjsLib from 'pdfjs-dist'
 import { PDFDocument, rgb, StandardFonts, degrees } from 'pdf-lib'
 import { useWallet } from '../context/WalletContext'
 import { getUpload, getDecryptParams, getEncryptedBook } from '../services/api'
-import { unwrapKeyFromLit } from '../services/lit'
+import { unlockBookKey } from '../services/lit'
 import { decryptPdfInBrowser, zeroMemory } from '../services/decryption'
+import { keyExpiry, loadBookKey, saveBookKey, forgetBookKey, forgetExpiredBookKeys } from '../services/keyStore'
 import { MOCK_BOOKS } from '../data/mockBooks'
 import '../styles/Reader.css'
 
@@ -50,7 +51,8 @@ async function addWatermarks(pdfBytes, { walletAddress, rentalDate, expiryDate, 
 const STEPS = [
   { key: 'fetching',     label: 'Downloading encrypted PDF from Arweave nodes' },
   { key: 'params',       label: 'Retrieving decryption envelope from backend' },
-  { key: 'lit',          label: 'Verifying on-chain rental & unsealing via Lit' },
+  { key: 'signing',      label: "Sign in your wallet to prove it's yours"      },
+  { key: 'lit',          label: 'Verifying on-chain access & unsealing via Lit' },
   { key: 'decrypting',   label: 'Decrypting PDF in browser memory (WebCrypto)' },
   { key: 'watermarking', label: 'Applying reader watermark'                    },
 ]
@@ -74,14 +76,19 @@ function Countdown({ expiryMs }) {
 export default function Reader() {
   const { arweaveHash } = useParams()
   const navigate        = useNavigate()
-  const { address }     = useWallet()
+  const { address, signer } = useWallet()
 
   const [bookTitle,    setBookTitle]    = useState('')
-  const storedExpiry = sessionStorage.getItem(`rental_expiry_${arweaveHash}`)
-  const rentalExpiry = storedExpiry ? parseInt(storedExpiry, 10) : Date.now() + 7 * 86_400_000
+  // Read once. Recomputing Date.now() on every render made this a new value each
+  // time, which re-ran the whole unlock pipeline (and its signature prompt) on
+  // every state change.
+  const [rentalExpiry] = useState(() => {
+    const storedExpiry = sessionStorage.getItem(`rental_expiry_${arweaveHash}`)
+    return storedExpiry ? parseInt(storedExpiry, 10) : Date.now() + 7 * 86_400_000
+  })
 
   // Flow state
-  const [loadPhase,    setLoadPhase]    = useState('idle')  // idle|fetching|params|lit|decrypting|watermarking|ready|error
+  const [loadPhase,    setLoadPhase]    = useState('idle')  // idle|fetching|params|signing|lit|decrypting|watermarking|ready|error
   const [doneSteps,    setDoneSteps]    = useState([])
   const [loadError,    setLoadError]    = useState(null)
   // Which door the Lit Action let this reader through: rental | uploader |
@@ -106,7 +113,12 @@ export default function Reader() {
     let cancelled = false
 
     const run = async () => {
-      const walletAddr = address ?? '0x0000000000000000000000000000000000000000'
+      // The Lit Action only knows a reader by their signature, so there is no
+      // reading without a connected wallet that can sign.
+      if (!address || !signer) {
+        throw new Error('Connect your wallet to open this book.')
+      }
+      const walletAddr = address
       const today      = new Date().toISOString().slice(0, 10)
       const expDate    = new Date(rentalExpiry).toISOString().slice(0, 10)
 
@@ -125,32 +137,81 @@ export default function Reader() {
       if (cancelled) return
       setDoneSteps(s => [...s, 'fetching'])
 
-      // Step 2: Fetch decryption parameters from backend
+      // Keys for access that has since ended, on books not opened again.
+      forgetExpiredBookKeys()
+
+      // Step 2: Fetch decryption parameters from backend. Also the free access
+      // check that every re-open with a saved key relies on.
       setLoadPhase('params')
-      const decryptParams = await getDecryptParams(arweaveHash, walletAddr)
+      let decryptParams
+      try {
+        decryptParams = await getDecryptParams(arweaveHash, walletAddr)
+      } catch (err) {
+        // No access any more (rental over, review window closed, …): a key this
+        // browser kept must not outlive it.
+        if (err?.status === 403 || err?.status === 409) await forgetBookKey(walletAddr, arweaveHash)
+        throw err
+      }
       if (cancelled) return
       setDoneSteps(s => [...s, 'params'])
 
-      // Step 3: Unwrap symmetric key via Lit Protocol TEE
-      setLoadPhase('lit')
-      const { key: symmetricKeyBase64, grantedVia } = await unwrapKeyFromLit(
-        decryptParams.litEncryptedKeyId,
-        walletAddr
-      )
+      // Step 3: the book key. Sign, then the Lit Action checks the chain and
+      // releases the key wrapped to a key pair this browser made for this read.
+      // The key is then kept, non-extractable, until the access ends, so opening
+      // the book again needs no signature and no Lit call (KEY-BINDING.md R3).
+      const unlockFresh = async () => {
+        const fresh = await unlockBookKey({
+          arweaveHash,
+          sealedKey: decryptParams.litEncryptedKeyId,
+          signer,
+          address: walletAddr,
+          onStage: (stage) => {
+            if (cancelled) return
+            if (stage === 'lit') setDoneSteps(s => [...s, 'signing'])
+            setLoadPhase(stage)
+          },
+        })
+        await saveBookKey(walletAddr, arweaveHash, {
+          ...fresh,
+          expiresAt: keyExpiry(fresh.grantedVia, decryptParams),
+        })
+        return fresh
+      }
+
+      const saved = await loadBookKey(walletAddr, arweaveHash)
       if (cancelled) return
-      // The TEE decided which door this reader came through; the backend's own
-      // answer is only advisory, so the Action's verdict is what gets stamped.
+      // Fresh: the TEE decided which door this reader came through, and its
+      // verdict is what gets stamped. Saved: the access check in step 2 just
+      // passed, so its answer is the current one.
+      let { cryptoKey, grantedVia } = saved
+        ? { cryptoKey: saved.cryptoKey, grantedVia: decryptParams.grantedVia }
+        : await unlockFresh()
+      if (cancelled) return
       setAccessMode(grantedVia)
-      setDoneSteps(s => [...s, 'lit'])
+      setDoneSteps(s => (saved ? [...s, 'signing', 'lit'] : [...s, 'lit']))
 
       // Step 4: WebCrypto AES-256-GCM decryption in browser RAM
       setLoadPhase('decrypting')
-      const decryptedPdfBytes = await decryptPdfInBrowser(
+      const decrypt = (key) => decryptPdfInBrowser(
         encryptedBuffer,
-        symmetricKeyBase64,
+        key,
         decryptParams.encryptionIv,
         decryptParams.encryptionAuthTag
       )
+      let decryptedPdfBytes
+      try {
+        decryptedPdfBytes = await decrypt(cryptoKey)
+      } catch (err) {
+        // A saved key that does not open the book is dropped and the book is
+        // unlocked afresh. A fresh key that fails is a real error.
+        if (!saved) throw err
+        await forgetBookKey(walletAddr, arweaveHash)
+        ;({ cryptoKey, grantedVia } = await unlockFresh())
+        if (cancelled) return
+        setAccessMode(grantedVia)
+        setLoadPhase('decrypting')
+        decryptedPdfBytes = await decrypt(cryptoKey)
+      }
       if (cancelled) return
       setDoneSteps(s => [...s, 'decrypting'])
 
@@ -191,7 +252,7 @@ export default function Reader() {
         pdfBytesRef.current = null
       }
     }
-  }, [arweaveHash, address, rentalExpiry])
+  }, [arweaveHash, address, signer, rentalExpiry])
 
   // ── Render page on canvas ──
   useEffect(() => {

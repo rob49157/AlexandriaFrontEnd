@@ -18,53 +18,174 @@
 // from the group once no old clients remain — and remove it immediately if an
 // edit ever leaves the older Action MORE permissive than the new one.
 //
-// Credentials come from .env via `node --env-file` (see package.json). LIT_API_KEY
-// has no VITE_ prefix on purpose: Vite only exposes VITE_* to the bundle, so this
-// admin key stays out of the shipped app.
+// The key is typed at a hidden prompt and held only in memory. Registering needs
+// the account key (or a usage key that can manage the decrypt group), and a key
+// that powerful must never sit in a file: .env files get committed (KEY-BINDING.md
+// F7). The dry run needs no key at all, because deriving a CID is unauthenticated.
 
+import { keccak256, toUtf8Bytes } from 'ethers';
 import { LIT_DECRYPT_ACTION_CODE } from '../src/services/litAction.js';
 
 const LIT_API_URL =
   process.env.LIT_API_URL || process.env.VITE_LIT_API_URL || 'https://api.chipotle.litprotocol.com/core/v1';
-const LIT_API_KEY = process.env.LIT_API_KEY;
-const GROUP_ID = Number(process.env.LIT_GROUP_ID || 1);
+// No default. Group 1 holds the encrypt Action; the decrypt Action belongs in its
+// own group (KEY-BINDING.md, steps C/D), and defaulting to 1 is how it would end
+// up beside a stray permissive entry.
+const GROUP_ID = Number(process.env.LIT_GROUP_ID);
 
 const SHOULD_REGISTER = process.argv.includes('--register');
+
+let apiKey = '';
+const redact = (text) => (apiKey ? String(text).split(apiKey).join('<REDACTED>') : String(text));
+
+function promptHidden(question) {
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    if (!stdin.isTTY) {
+      console.error('No interactive terminal: run this in your own terminal so the key can be typed.');
+      process.exit(1);
+    }
+    process.stdout.write(question);
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding('utf8');
+    let value = '';
+    const onData = (chunk) => {
+      for (const c of chunk) {
+        if (c === '\r' || c === '\n') {
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.off('data', onData);
+          process.stdout.write('\n');
+          resolve(value.trim());
+          return;
+        }
+        if (c === '\u0003') process.exit(130);
+        if (c === '\u007f' || c === '\b') value = value.slice(0, -1);
+        else value += c;
+      }
+    };
+    stdin.on('data', onData);
+  });
+}
 
 async function api(endpoint, body, method = 'POST') {
   const opts = {
     method,
-    headers: { 'Content-Type': 'application/json', 'X-Api-Key': LIT_API_KEY },
+    headers: { 'Content-Type': 'application/json' },
   };
+  if (apiKey) opts.headers['X-Api-Key'] = apiKey;
   if (body && method !== 'GET') opts.body = JSON.stringify(body);
 
   const res = await fetch(LIT_API_URL + endpoint, opts);
   const text = await res.text();
-  console.log(`  ${endpoint} -> ${res.status}: ${text}`);
+  console.log(`  ${endpoint} -> ${res.status}: ${redact(text)}`);
 
   if (!res.ok) throw new Error(`${endpoint} failed with ${res.status}`);
   return text;
 }
 
+// A GET that prints nothing, for the key check below: its listings are long.
+async function read(endpoint) {
+  const res = await fetch(LIT_API_URL + endpoint, { headers: { 'X-Api-Key': apiKey } });
+  const text = await res.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // left null; the caller reports the status
+  }
+  return { status: res.status, json };
+}
+
+// Lit answers a usage key's management write with a bare 403 "Permission denied",
+// which reads like a broken account. So name the key first, with free reads only.
+// Lit stores usage keys by keccak256 of the key and lists those hashes to any key
+// on the account, so hashing what was typed identifies it without printing it.
+// The account key is the one key that is not in that list.
+// Returns a reason to stop, or null to go ahead.
+async function checkKey() {
+  const exists = await read('/account_exists');
+  if (exists.json !== true) {
+    return 'Lit does not recognise that key: mistyped, or not a Lit key.';
+  }
+  const groups = await read('/list_groups?page_number=0&page_size=100');
+  const keys = await read('/list_api_keys?page_number=0&page_size=100');
+  if (!Array.isArray(groups.json) || !Array.isArray(keys.json)) {
+    return `Could not read the account (list_groups ${groups.status}, list_api_keys ${keys.status}).`;
+  }
+
+  const group = groups.json.find((g) => BigInt(g.id) === BigInt(GROUP_ID));
+  if (!group) {
+    const names = groups.json.map((g) => `${BigInt(g.id)} "${g.name}"`).join(', ') || 'none';
+    return `This key's account has no group ${GROUP_ID}, so it is a different Lit account. Its groups: ${names}.`;
+  }
+  console.log(`   Group ${GROUP_ID} on this key's account: "${group.name}"`);
+
+  const hash = keccak256(toUtf8Bytes(apiKey)).toLowerCase();
+  const usage = keys.json.find((k) => String(k.api_key_hash).toLowerCase() === hash);
+  if (!usage) {
+    console.log('   Key: the account key.');
+    return null;
+  }
+  const manages = (usage.can_manage_ipfs_ids_in_groups || []).map(Number);
+  if (!manages.includes(GROUP_ID)) {
+    return (
+      `That is the usage key "${usage.name}", which cannot add Actions to group ${GROUP_ID}; Lit would\n` +
+      'answer 403 "Permission denied". Use the account key: the one Lit showed once when the\n' +
+      'account was created. Neither key in AlexNode/.env can do this, by design.'
+    );
+  }
+  console.log(`   Key: usage key "${usage.name}", which can manage group ${GROUP_ID}.`);
+  return null;
+}
+
 async function main() {
-  if (!LIT_API_KEY) {
-    console.error('LIT_API_KEY is not set. Add it to .env (no VITE_ prefix — it must not reach the bundle).');
+  if (process.env.LIT_API_KEY) {
+    console.error('LIT_API_KEY is set, probably in .env. Remove it: this script asks for the key at a');
+    console.error('hidden prompt, so a key that can manage Lit groups is never written to a file.');
     process.exit(1);
   }
 
   console.log(`Decryption Action source: ${LIT_DECRYPT_ACTION_CODE.length} bytes\n`);
 
-  console.log('1. Derive IPFS CID (free, read-only)...');
+  console.log('1. Derive IPFS CID (free, read-only, no key needed)...');
   const cid = JSON.parse(await api('/get_lit_action_ipfs_id', LIT_DECRYPT_ACTION_CODE));
   console.log(`   CID: ${cid}`);
 
+  console.log(`   The backend relay only forwards this exact code: set LIT_DECRYPT_ACTION_CID=${cid}`);
+  console.log('   in AlexNode/.env once it is registered.');
+
   if (!SHOULD_REGISTER) {
     console.log('\nDry run — nothing was registered.');
-    console.log('Re-run with --register to permit this CID against the PKP.');
+    console.log('Re-run with --register to permit this CID in the decrypt group.');
     return;
   }
 
-  console.log('\n2. Register action...');
+  if (!Number.isInteger(GROUP_ID) || GROUP_ID < 1) {
+    console.error('\nLIT_GROUP_ID is not set. Set it to the "Alexandria decrypt" group id.');
+    process.exit(1);
+  }
+  if (GROUP_ID === 1) {
+    console.error('\nRefusing group 1: it is the encryption group. The decrypt Action needs its own group');
+    console.error('(KEY-BINDING.md, steps C/D and R6).');
+    process.exit(1);
+  }
+
+  apiKey = await promptHidden('\nLit account key, or a usage key that can manage this group (hidden): ');
+  if (!apiKey) {
+    console.error('No key entered.');
+    process.exit(1);
+  }
+
+  console.log('\n2. Check the key (free reads, nothing is changed)...');
+  const problem = await checkKey();
+  if (problem) {
+    console.error(`\n${problem}\nNothing was changed.`);
+    process.exit(1);
+  }
+
+  console.log('\n3. Register action...');
   await api('/add_action', {
     action_ipfs_cid: cid,
     name: 'alexandria-decrypt',
@@ -73,15 +194,17 @@ async function main() {
       'or a librarian reviewing it inside its challenge window.',
   });
 
-  console.log(`\n3. Add action to group ${GROUP_ID}...`);
+  console.log(`\n4. Add action to group ${GROUP_ID}...`);
   await api('/add_action_to_group', { group_id: GROUP_ID, action_ipfs_cid: cid });
 
   // KEY-BINDING.md asks for this list to be enumerated after every change: a
   // stray permissive Action left over from testing defeats every check above.
-  console.log('\n4. Permitted actions — read this list, do not skip it...');
-  await api('/list_actions?page_number=0&page_size=100', null, 'GET');
+  console.log(`\n5. What group ${GROUP_ID} permits — read both lists, do not skip them...`);
+  await api(`/list_actions?group_id=${GROUP_ID}&page_number=0&page_size=100`, null, 'GET');
+  await api(`/list_wallets_in_group?group_id=${GROUP_ID}&page_number=0&page_size=100`, null, 'GET');
 
-  console.log('\nRegistered. Every entry above should be one you recognise.');
+  console.log('\nRegistered. The group should hold this CID and our PKP, and nothing else:');
+  console.log('no "Any" action, no 0x000… wallet, no leftover test actions.');
 }
 
 main().catch((e) => {
