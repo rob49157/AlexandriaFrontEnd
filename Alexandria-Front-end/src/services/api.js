@@ -79,8 +79,39 @@ export async function getDecryptParams(arweaveHash, address) {
 }
 
 /**
+ * Relay a signed unlock request to the decryption Lit Action. The backend checks
+ * the request, then forwards it to Lit with the only key that can run the
+ * Action. The answer is the book's key wrapped to this browser's session key,
+ * which the relay cannot open.
+ *
+ * @param {string} arweaveHash
+ * @param {{ code: string, authMessage: string, authSignature: string, sessionPublicKey: string }} body
+ * @returns {Promise<{ wrappedKey: string, grantedVia: string }>}
+ */
+export async function unlockBook(arweaveHash, body) {
+  return fetchJson(`/rental/unlock/${encodeURIComponent(arweaveHash)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Upload limits for one wallet, and the shared daily storage budget.
+ * @param {string} address
+ * @returns {Promise<{ canUpload: boolean, reason: string|null, message: string|null,
+ *   awaitingStake: { count: number, max: number, books: { arweaveHash: string, title: string, status: string }[] },
+ *   last24h: { count: number, max: number },
+ *   budget: { usedAr: string, limitAr: string, percentUsed: number, exhausted: boolean } }>}
+ */
+export async function getUploadQuota(address) {
+  return fetchJson(`/upload/quota/${encodeURIComponent(address)}`);
+}
+
+/**
  * Upload a PDF file with metadata and wallet address
- * @param {FormData} formData - contains 'file', 'title', 'author', 'category', 'description', 'walletAddress'
+ * @param {FormData} formData - contains 'file', 'title', 'author', 'category', 'description', 'walletAddress',
+ *   and 'authMessage' + 'authSignature': the wallet's signature over the file (buildUploadMessage)
  */
 export async function uploadPdf(formData) {
   const url = `${API_URL}/upload`;

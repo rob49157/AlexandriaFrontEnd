@@ -24,27 +24,23 @@ export function base64ToUint8Array(base64) {
 /**
  * Decrypt an AES-256-GCM encrypted PDF buffer in-memory using WebCrypto.
  *
- * @param {ArrayBuffer|Uint8Array} encryptedBytes - Ciphertext downloaded from Arweave/Irys
- * @param {string} base64Key                     - 32-byte symmetric key from Lit Action
+ * @param {ArrayBuffer|Uint8Array} encryptedBytes - Ciphertext downloaded from Arweave
+ * @param {CryptoKey} cryptoKey                  - Non-extractable AES-GCM key from unlockBookKey()
  * @param {string} base64Iv                      - 12-byte IV from decrypt-params
  * @param {string} base64AuthTag                 - 16-byte Auth Tag from decrypt-params
  * @returns {Promise<Uint8Array>}                - Decrypted PDF bytes in RAM
  */
-export async function decryptPdfInBrowser(encryptedBytes, base64Key, base64Iv, base64AuthTag) {
+export async function decryptPdfInBrowser(encryptedBytes, cryptoKey, base64Iv, base64AuthTag) {
   if (!encryptedBytes || encryptedBytes.byteLength === 0) {
     throw new Error('Missing or empty encrypted PDF buffer.');
   }
-  if (!base64Key || !base64Iv || !base64AuthTag) {
+  if (!cryptoKey || cryptoKey.type !== 'secret' || !base64Iv || !base64AuthTag) {
     throw new Error('Missing decryption parameters (key, IV, or Auth Tag).');
   }
 
-  const rawKey = base64ToUint8Array(base64Key);
   const ivBytes = base64ToUint8Array(base64Iv);
   const authTagBytes = base64ToUint8Array(base64AuthTag);
 
-  if (rawKey.length !== 32) {
-    throw new Error(`Invalid key length: expected 32 bytes, got ${rawKey.length}`);
-  }
   if (ivBytes.length !== 12) {
     throw new Error(`Invalid IV length: expected 12 bytes, got ${ivBytes.length}`);
   }
@@ -58,16 +54,8 @@ export async function decryptPdfInBrowser(encryptedBytes, base64Key, base64Iv, b
   combinedBuffer.set(ciphertext, 0);
   combinedBuffer.set(authTagBytes, ciphertext.length);
 
-  // 2. Import symmetric AES-GCM key
-  const cryptoKey = await window.crypto.subtle.importKey(
-    'raw',
-    rawKey,
-    { name: 'AES-GCM' },
-    false,
-    ['decrypt']
-  );
-
-  // 3. Decrypt in-memory
+  // 2. Decrypt in-memory. The key arrives already imported and non-extractable,
+  //    so its raw bytes are never in this page to zero.
   let decryptedArrayBuffer;
   try {
     decryptedArrayBuffer = await window.crypto.subtle.decrypt(
@@ -81,9 +69,6 @@ export async function decryptPdfInBrowser(encryptedBytes, base64Key, base64Iv, b
     );
   } catch (err) {
     throw new Error(`PDF decryption failed: Authentication tag or key mismatch (${err.message})`);
-  } finally {
-    // Zero out raw key buffer in RAM
-    rawKey.fill(0);
   }
 
   return new Uint8Array(decryptedArrayBuffer);

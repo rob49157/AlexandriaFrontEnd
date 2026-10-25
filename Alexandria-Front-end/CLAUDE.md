@@ -38,10 +38,16 @@ This app handles:
 ### Upload Flow (Archivist)
 ```
 === FRONTEND (UI + on-chain transactions) ===
+0. Upload page shows the wallet's limits first (GET /api/upload/quota/:address):
+   uploads waiting for a stake (max 3, each with "Stake now →"/"View progress →"),
+   uploads in the last 24 h (max 10), and the shared daily storage budget. At a
+   limit the button is disabled and the reason shown.
 1. Archivist selects PDF file and fills in metadata (title, author, category, description)
-2. Frontend sends PDF + metadata + wallet address to backend: POST /api/upload
-3. Backend validates → encrypts (AES-256) → signs Irys tx → seals key envelope in Lit TEE → uploads to Arweave → indexes in Postgres → registers on AlexandriaLibrary
-4. Backend returns { arweaveHash, litEncryptedKeyId, registration, nextStep } to frontend
+2. The wallet signs an EIP-4361 message naming the PDF's SHA-256
+   (buildUploadMessage in src/services/unlockMessage.js); frontend sends PDF +
+   metadata + wallet address + authMessage + authSignature: POST /api/upload
+3. Backend checks the signature and limits → validates → encrypts (AES-256) → signs the Arweave L1 tx → seals key envelope in Lit TEE → indexes in Postgres → posts to Arweave (202); a worker stores it and registers it on AlexandriaLibrary
+4. Frontend polls GET /api/storage/:arweaveHash until status is "pending"
 
 === FRONTEND (on-chain, signed by archivist's wallet) ===
 5. Frontend calls token.approve(stakeContractAddress, 100 ALEX) — archivist signs
@@ -62,11 +68,24 @@ This app handles:
 
 ### PDF Decryption & Display Flow (Reader — after rental)
 ```
-1. Frontend downloads encrypted PDF directly from Arweave/Irys: fetch(https://gateway.irys.xyz/{arweaveHash})
+1. Frontend downloads the ciphertext through the backend: GET /api/storage/{arweaveHash}/data
+   (raw Arweave nodes are plain HTTP; the backend proof-checks every chunk)
 2. Frontend requests decryption parameters from backend: GET /api/rental/decrypt-params/{arweaveHash}/{readerAddress}
-3. Frontend requests symmetric key from Lit Protocol TEE using litEncryptedKeyId
-   → Lit TEE executes Decryption Lit Action: unseals envelope, extracts sealed arweaveHash, verifies Rent.isRentalActive() / uploader carve-out
-   → Access authorized → Lit TEE releases symmetric key k
+   → also the free access check: a 403/409 deletes any key this browser kept for the book
+3. If this browser kept the key for this wallet and book (src/services/keyStore.js,
+   IndexedDB, non-extractable CryptoKey, until the access ends), use it: no
+   signature, no Lit call. Otherwise unlock it (src/services/lit.js → unlockBookKey)
+   and keep it:
+   → creates a non-extractable RSA-OAEP key pair for this read (the "session key")
+   → the reader signs an EIP-4361 message (src/services/unlockMessage.js) naming
+     their wallet, sha256(sealed key), sha256(session public key), localhost:5173,
+     chain 84532, and a 5-minute window
+   → POST /api/rental/unlock/{arweaveHash} — the backend checks it and relays it to Lit
+   → Decryption Lit Action (src/services/litAction.js) recovers the wallet from the
+     signature, unseals the envelope, gates on the sealed arweaveHash (rental /
+     uploader who STAKED the book / librarian review, two RPC providers must agree), and returns k
+     WRAPPED to the session public key — never in the clear
+   → browser unwrapKey()s it straight into a non-extractable AES-GCM CryptoKey
 4. Frontend decrypts PDF in browser memory using WebCrypto subtle.decrypt (AES-256-GCM)
 5. Frontend watermarks every page (wallet address, rental date, expiry date)
 6. Frontend displays watermarked PDF in viewer
@@ -193,9 +212,11 @@ Alexandria-Front-end/
 │   │   └── TransactionStatus.jsx   # Pending/confirmed transaction feedback
 │   │
 │   ├── services/
-│   │   ├── api.js                  # Axios instance, backend API calls (upload, search, status)
-│   │   ├── arweave.js              # Fetch encrypted PDFs from arweave.net/{hash}
-│   │   ├── lit.js                  # Lit Protocol key retrieval with access conditions
+│   │   ├── api.js                  # Backend API calls (upload, quota, search, storage, decrypt-params, unlock)
+│   │   ├── lit.js                  # unlockBookKey: session key, signed unlock, relay, unwrap
+│   │   ├── litAction.js            # The decryption Lit Action (security code; its CID is what Lit permits)
+│   │   ├── unlockMessage.js        # EIP-4361 messages the wallet signs: unlock and upload
+│   │   ├── keyStore.js             # Book keys kept in IndexedDB (non-extractable) until access ends
 │   │   └── decryption.js           # AES-256-GCM decryption in browser
 │   │
 │   ├── utils/
@@ -223,8 +244,11 @@ VITE_STAKE_CONTRACT_ADDRESS=
 VITE_RENT_CONTRACT_ADDRESS=
 VITE_PAYMENT_CONTRACT_ADDRESS=
 
-# Lit Protocol
-VITE_LIT_NETWORK=cayenne
+# Lit Protocol — nothing in the bundle. Unlocks go through the backend relay,
+# and the PKP id is a constant in src/services/litAction.js. LIT_GROUP_ID is for
+# `npm run lit:register` only; that script asks for its Lit key at a hidden prompt
+# and refuses to run if LIT_API_KEY is set, so the key never lands in .env.
+# .env is gitignored and untracked (KEY-BINDING.md F7): copy .env.example.
 
 # Arweave
 VITE_ARWEAVE_GATEWAY=https://arweave.net
@@ -267,7 +291,11 @@ ABIs are generated by `npx hardhat compile` in the `AlexandriaSmartContract` rep
 
 ### In-Browser Decryption Rules
 - Decrypted PDF exists **only in browser memory** (ArrayBuffer/Blob)
-- NEVER write to localStorage, sessionStorage, IndexedDB, or disk
+- NEVER write the decrypted PDF to localStorage, sessionStorage, IndexedDB, or disk
+- The book's AES key may be kept in IndexedDB ONLY as a non-extractable CryptoKey,
+  per wallet + book, until the access ends (src/services/keyStore.js) — never as
+  bytes, never in localStorage. Non-extractable binds scripts, not the disk: the
+  browser writes the bytes into its profile (see AlexNode/KEY-BINDING.md, R3)
 - Clear decrypted content from memory on page close, tab switch, or rental expiry
 - Use `URL.revokeObjectURL()` to clean up blob URLs after display
 
@@ -309,4 +337,4 @@ formData.append('walletAddress', address);
 - **AlexNode (Backend):** Frontend calls the backend REST API for uploads (`POST /api/upload`) and search (`GET /api/search`). Backend returns `{ arweaveHash, litEncryptedKeyId }` after processing uploads. Frontend does NOT call the backend for rentals or payments.
 - **AlexandriaSmartContract:** Frontend needs contract ABIs and deployed addresses. ABIs come from `npx hardhat compile` in that repo. Frontend calls contracts directly with the user's wallet for all on-chain transactions.
 - **Arweave:** Frontend fetches encrypted PDFs directly from `https://arweave.net/{arweaveHash}`. No backend involvement.
-- **Lit Protocol:** Frontend requests decryption keys directly from Lit. Lit checks `Rent.sol.isRentalActive()` on-chain before releasing keys. No backend involvement.
+- **Lit Protocol:** The decryption Lit Action lives here (`src/services/litAction.js`), but requests reach Lit through the backend relay (`POST /api/rental/unlock/:arweaveHash`), which holds the only key that can run it and rate-limits it. The Action checks the chain itself and answers with the key wrapped to the reader's session key, so the relay never sees a usable key. Every edit to the Action changes its CID: run `npm run test:lit-action`, re-pass the checklist in `AlexNode/KEY-BINDING.md`, `npm run lit:register`, then set `LIT_DECRYPT_ACTION_CID` in the backend.

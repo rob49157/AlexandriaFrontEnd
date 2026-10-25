@@ -361,10 +361,88 @@
   display: block;
 }
 
-.upload__cta:hover {
+.upload__cta:hover:not(:disabled) {
   background: var(--accent-hover);
   transform: translateY(-1px);
   box-shadow: 0 6px 20px rgba(201, 168, 76, 0.28);
+}
+
+.upload__cta:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Upload limits panel ── */
+.upload__quota {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.875rem 1rem;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.upload__quota-title {
+  margin: 0;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.upload__quota-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.upload__quota-row strong {
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.upload__quota-books {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.upload__quota-books li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.upload__quota-book {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload__quota-resume {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.upload__quota-resume:hover {
+  color: var(--accent-hover);
+}
+
+.upload__quota-hint {
+  margin: 0.25rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 
 .upload__cta--link {

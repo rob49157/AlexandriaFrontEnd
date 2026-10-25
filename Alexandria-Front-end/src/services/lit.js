@@ -1,91 +1,149 @@
-// Lit Protocol Client for Frontend Reader Decryption
+// Unlock a book's AES key through the decryption Lit Action.
 //
-// Communicates with Lit Protocol Chipotle v3 TEE to unseal the book's symmetric key.
-// The TEE executes the immutable Decryption Lit Action, which validates on-chain
-// rental permissions on Base Sepolia against the arweaveHash sealed inside the envelope.
+// The reader proves who they are by signing an EIP-4361 message
+// (unlockMessage.js); the backend relays the request to Lit (POST
+// /api/rental/unlock/:arweaveHash); the Action checks the chain inside the TEE and answers
+// with the key wrapped to an RSA key pair this browser created for this read.
+//
+// The private half of that pair is generated non-extractable, and the key is
+// unwrapped straight into a non-extractable AES-GCM CryptoKey. So the book's key
+// never exists as readable bytes here, in the network response, at the relay,
+// or in Lit's logs — and a captured signature is useless to anyone else, because
+// the Action only ever wraps to the session key named inside it.
+//
+// No Lit credentials live in this bundle: the relay holds the only key that can
+// run the Action (KEY-BINDING.md, R4).
+
+import { getAddress } from 'ethers';
 
 import { LIT_DECRYPT_ACTION_CODE } from './litAction';
+import { buildUnlockMessage, randomNonce, sha256Hex, toIsoSeconds, UNLOCK_WINDOW_SECONDS } from './unlockMessage';
+import { unlockBook } from './api';
+import { isUserRejection } from '../utils/walletErrors';
 
-const LIT_API_URL = import.meta.env.VITE_LIT_API_URL || 'https://api.chipotle.litprotocol.com/core/v1';
-const LIT_PKP_ID = import.meta.env.VITE_LIT_PKP_ID || '';
-const LIT_API_KEY = import.meta.env.VITE_LIT_API_KEY || '';
+const GRANTS = new Set(['rental', 'uploader', 'librarian_review']);
+
+// The Action's and the relay's error codes, in words a reader can act on.
+const ERROR_TEXT = {
+  access_denied:
+    'Access denied: Base Sepolia shows no active rental, archivist ownership, ' +
+    'or open librarian review window for this wallet.',
+  no_active_rental: 'No active rental for this wallet. Rent the book first.',
+  rent_contract_paused: 'Rentals are paused on-chain right now, so access cannot be checked. Try again later.',
+  auth_expired: 'The signature expired before it was checked. Open the book again.',
+  auth_not_yet_valid: "Your computer's clock is ahead of the chain. Correct the clock and try again.",
+  auth_domain: 'This site is not allowed to unlock books. Open Alexandria from its official address.',
+  auth_wallet_mismatch: 'The signature does not match the connected wallet. Reconnect and try again.',
+  bad_signature: 'The wallet signature could not be verified. Smart-contract wallets are not supported yet.',
+  clock_unavailable: 'The chain could not be reached to check the time. Try again in a minute.',
+  rpc_disagree: 'The two Base Sepolia providers gave different answers, so access was refused. Try again shortly.',
+  rate_limited: 'Too many unlock attempts. Wait a few minutes and try again.',
+  not_registered: 'This book is not registered on-chain yet. It can be opened once storage and registration finish.',
+  stake_required: 'Stake this book to open it. Archivists can read their own uploads once they have staked them.',
+  unlock_budget_low: 'Book unlocking is paused while the service tops up its credit. Try again later.',
+  unlock_not_configured: 'Book unlocking is not set up on this server yet.',
+  action_not_permitted: 'This app version is out of date with the server. Reload the page.',
+};
+
+function readableError(code, fallback) {
+  return ERROR_TEXT[code] || (code ? `Unlock refused: ${code}` : fallback || 'Unlock failed.');
+}
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return window.btoa(binary);
+}
+
+function base64ToBytes(base64) {
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
 
 /**
- * Request the symmetric AES key from Lit Protocol TEE.
+ * Ask the decryption Lit Action for one book's key.
  *
- * @param {string} sealedCiphertext - The litEncryptedKeyId from decrypt-params
- * @param {string} userAddress      - The reader's connected wallet address
- * @returns {Promise<{ key: string, grantedVia: string }>}
- *   key        — 32-byte base64-encoded AES key (k)
- *   grantedVia — 'rental' | 'uploader' | 'librarian_review', which decides the
- *                watermark stamped on every page. A review copy has to be
- *                identifiable as one if it ever leaves the librarian's screen.
+ * @param {object} p
+ * @param {string} p.arweaveHash  the book
+ * @param {string} p.sealedKey    litEncryptedKeyId from decrypt-params
+ * @param {import('ethers').Signer} p.signer   the connected wallet
+ * @param {string} p.address      the connected wallet's address
+ * @param {(stage: 'signing'|'lit') => void} [p.onStage]  progress for the UI
+ * @returns {Promise<{ cryptoKey: CryptoKey, grantedVia: 'rental'|'uploader'|'librarian_review' }>}
+ *   cryptoKey  — non-extractable AES-GCM key, usable only to decrypt
+ *   grantedVia — decides the watermark stamped on every page. A review copy has
+ *                to be identifiable as one if it ever leaves the librarian's screen.
  */
-export async function unwrapKeyFromLit(sealedCiphertext, userAddress) {
-  if (!sealedCiphertext) {
-    throw new Error('Missing sealed key ciphertext.');
-  }
-  if (!userAddress) {
-    throw new Error('Wallet address is required for rental access verification.');
-  }
+export async function unlockBookKey({ arweaveHash, sealedKey, signer, address, onStage = () => {} }) {
+  if (!sealedKey) throw new Error('Missing sealed key.');
+  if (!signer || !address) throw new Error('Connect your wallet to open this book.');
 
-  const headers = { 'Content-Type': 'application/json' };
-  if (LIT_API_KEY) {
-    headers['X-Api-Key'] = LIT_API_KEY;
-  }
+  // 1. A key pair for this read only. Its private half can never be exported.
+  const session = await window.crypto.subtle.generateKey(
+    { name: 'RSA-OAEP', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    false,
+    ['wrapKey', 'unwrapKey']
+  );
+  const spki = new Uint8Array(await window.crypto.subtle.exportKey('spki', session.publicKey));
 
-  const payload = {
-    code: LIT_DECRYPT_ACTION_CODE,
-    js_params: {
-      pkpId: LIT_PKP_ID,
-      ciphertext: sealedCiphertext,
-      userAddress: userAddress.toLowerCase(),
-    },
-  };
-
-  const res = await fetch(`${LIT_API_URL}/lit_action`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload),
+  // 2. The message: this wallet, this book, this browser, the next few minutes.
+  const issued = Math.floor(Date.now() / 1000);
+  const authMessage = buildUnlockMessage({
+    domain: window.location.host,
+    uri: window.location.origin,
+    address: getAddress(address),
+    nonce: randomNonce(),
+    issuedAt: toIsoSeconds(issued),
+    expirationTime: toIsoSeconds(issued + UNLOCK_WINDOW_SECONDS),
+    sealedKeyHash: await sha256Hex(new TextEncoder().encode(sealedKey)),
+    sessionKeyHash: await sha256Hex(spki),
   });
 
-  if (!res.ok) {
-    const errorText = await res.text().catch(() => '');
-    throw new Error(`Lit Protocol request failed (${res.status}): ${errorText || 'TEE unreachable'}`);
+  // 3. The reader signs it.
+  onStage('signing');
+  let authSignature;
+  try {
+    authSignature = await signer.signMessage(authMessage);
+  } catch (err) {
+    if (isUserRejection(err)) throw new Error('You declined the signature, so the book stays locked.');
+    throw new Error(`Your wallet could not sign: ${err?.shortMessage || err?.message || 'unknown error'}`);
   }
 
-  const result = await res.json();
-
-  if (result.has_error) {
-    throw new Error(`Lit Action execution error: ${result.logs || result.response || 'Unknown error'}`);
+  // 4. The relay forwards it to the Action.
+  onStage('lit');
+  let result;
+  try {
+    result = await unlockBook(arweaveHash, {
+      code: LIT_DECRYPT_ACTION_CODE,
+      authMessage,
+      authSignature,
+      sessionPublicKey: bytesToBase64(spki),
+    });
+  } catch (err) {
+    throw new Error(readableError(err?.data?.error, err?.message));
   }
 
-  let parsedResponse = result.response;
-  if (typeof parsedResponse === 'string') {
-    try {
-      parsedResponse = JSON.parse(parsedResponse);
-    } catch {
-      // Keep as string if not JSON
-    }
+  if (typeof result?.wrappedKey !== 'string' || !GRANTS.has(result.grantedVia)) {
+    throw new Error('The unlock service returned an incomplete answer.');
   }
 
-  if (parsedResponse?.error) {
-    if (parsedResponse.error === 'access_denied') {
-      throw new Error(
-        'Access Denied: Base Sepolia shows no active rental, archivist ownership, ' +
-          'or open librarian review window for this book.'
-      );
-    }
-    throw new Error(`Lit Action rejected request: ${parsedResponse.error}`);
+  // 5. Unwrap straight into a key that can decrypt and do nothing else.
+  let cryptoKey;
+  try {
+    cryptoKey = await window.crypto.subtle.unwrapKey(
+      'raw',
+      base64ToBytes(result.wrappedKey),
+      session.privateKey,
+      { name: 'RSA-OAEP' },
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['decrypt']
+    );
+  } catch {
+    throw new Error('The key returned for this book could not be opened by this browser.');
   }
 
-  const key = parsedResponse?.key || (typeof parsedResponse === 'string' ? parsedResponse : null);
-
-  if (!key) {
-    throw new Error('Lit Action returned incomplete response without symmetric key.');
-  }
-
-  // Older permitted versions of the Action returned the key alone. Treat a
-  // missing grantedVia as a rental rather than guessing something weaker.
-  return { key, grantedVia: parsedResponse?.grantedVia || 'rental' };
+  return { cryptoKey, grantedVia: result.grantedVia };
 }
