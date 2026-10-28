@@ -803,3 +803,192 @@
   border-color: var(--border-accent);
   color: var(--accent);
 }
+
+/* ── Independent challenge-review panel ──────────────────────────────── */
+.dash__challenge-reviews {
+  margin-top: 3rem;
+}
+
+.dash__challenge-reviews-intro {
+  max-width: 52rem;
+  margin: -0.75rem 0 1rem;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.dash__challenge-review-card {
+  margin-bottom: 0.85rem;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+.dash__challenge-review-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+}
+
+.dash__challenge-review-heading h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+}
+
+.dash__challenge-review-heading p {
+  margin: 0.3rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.dash__challenge-reason,
+.dash__review-progress,
+.dash__review-ballots,
+.dash__review-form,
+.dash__owner-resolution {
+  padding: 0.85rem 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.dash__challenge-reason {
+  background: rgba(224, 96, 96, 0.045);
+}
+
+.dash__challenge-reason strong,
+.dash__review-progress strong {
+  color: var(--text-primary);
+  font-size: 0.82rem;
+}
+
+.dash__challenge-reason p {
+  margin: 0.35rem 0 0;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.dash__review-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.dash__review-consensus {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.85rem;
+  color: #4caf7a;
+  font-weight: 600;
+}
+
+.dash__review-ballots {
+  display: grid;
+  gap: 0.65rem;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.dash__review-ballots strong {
+  color: var(--text-primary);
+}
+
+.dash__review-actions,
+.dash__review-form,
+.dash__owner-resolution {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.dash__review-uphold,
+.dash__review-dismiss {
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dash__review-uphold:hover:not(:disabled) {
+  border-color: rgba(224, 96, 96, 0.55);
+  color: #e06060;
+}
+
+.dash__review-dismiss:hover:not(:disabled) {
+  border-color: rgba(76, 175, 122, 0.55);
+  color: #4caf7a;
+}
+
+.dash__review-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.dash__review-locked {
+  margin: 0;
+  padding: 0.8rem 1.25rem;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.dash__review-form {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.dash__review-form > strong,
+.dash__review-form label {
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+}
+
+.dash__review-form textarea {
+  display: block;
+  width: 100%;
+  margin-top: 0.4rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  resize: vertical;
+}
+
+.dash__owner-resolution {
+  justify-content: space-between;
+  background: rgba(76, 175, 122, 0.045);
+}
+
+.dash__owner-resolution p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+@media (max-width: 560px) {
+  .dash__challenge-review-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dash__review-progress {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

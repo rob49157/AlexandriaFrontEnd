@@ -211,3 +211,27 @@ export async function getReviewQueue({ librarian = '', limit = 50 } = {}) {
 
   return fetchJson(`/librarian/review-queue?${query.toString()}`);
 }
+
+/**
+ * Fetch challenged books awaiting three independent librarian reviews.
+ * Vote directions remain hidden until all three reviews are submitted.
+ * @param {string} librarian
+ */
+export async function getChallengeReviews(librarian = '') {
+  const query = new URLSearchParams();
+  if (librarian) query.set('librarian', librarian);
+  return fetchJson(`/librarian/challenges?${query.toString()}`);
+}
+
+/**
+ * Submit one wallet-signed, immutable review for a pending challenge.
+ * @param {string} arweaveHash
+ * @param {{ librarian: string, vote: 'uphold'|'dismiss', rationale: string, timestamp: number, signature: string }} body
+ */
+export async function submitChallengeReview(arweaveHash, body) {
+  return fetchJson(`/librarian/challenges/${encodeURIComponent(arweaveHash)}/reviews`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+  });
+}

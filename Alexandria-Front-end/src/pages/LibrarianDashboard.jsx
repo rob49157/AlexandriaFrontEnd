@@ -6,7 +6,7 @@ import ConnectWalletPrompt from '../components/ConnectWalletPrompt'
 import WalletSelectModal from '../components/WalletSelectModal'
 import { useContracts } from '../hooks/useContracts'
 import { AuditBadges, AuditSummary } from '../components/AuditBadges'
-import { getReviewQueue } from '../services/api'
+import { getChallengeReviews, getReviewQueue, submitChallengeReview } from '../services/api'
 import '../styles/Dashboard.css'
 
 const CATEGORY_STYLE = {
@@ -81,7 +81,7 @@ function txErrorMessage(err) {
 }
 
 export default function LibrarianDashboard() {
-  const { address } = useWallet()
+  const { address, signer } = useWallet()
   const { tokenContract, stakeContract } = useContracts()
 
   const [showWalletSelect, setShowWalletSelect] = useState(false)
@@ -101,6 +101,12 @@ export default function LibrarianDashboard() {
   const [unavailable,  setUnavailable]  = useState(0)
   const [queueLoading, setQueueLoading] = useState(false)
   const [queueError,   setQueueError]   = useState(null)
+  const [challenges, setChallenges] = useState([])
+  const [challengesLoading, setChallengesLoading] = useState(false)
+  const [challengeReviewsError, setChallengeReviewsError] = useState(null)
+  const [reviewForm, setReviewForm] = useState(null) // { hash, vote, rationale, error, pending }
+  const [isContractOwner, setIsContractOwner] = useState(false)
+  const [resolutionState, setResolutionState] = useState({})
 
   // Staking state
   const [isLibrarian, setIsLibrarian] = useState(false)
@@ -117,12 +123,29 @@ export default function LibrarianDashboard() {
         if (info.active) {
           setStakedAmount(ethers.formatUnits(info.amount, 18))
         }
+        const owner = await stakeContract.owner()
+        setIsContractOwner(owner.toLowerCase() === address.toLowerCase())
       } catch (err) {
         console.error("Error fetching librarian status", err)
       }
     }
     checkLibrarianStatus()
   }, [address, stakeContract])
+
+  const loadChallenges = useCallback(async ({ silent = false } = {}) => {
+    if (!address) return
+    if (!silent) setChallengesLoading(true)
+    try {
+      const data = await getChallengeReviews(address)
+      setChallenges(Array.isArray(data.queue) ? data.queue : [])
+      setChallengeReviewsError(null)
+    } catch (err) {
+      console.error('Could not load challenged books', err)
+      setChallengeReviewsError(err.message || 'Could not load challenge reviews.')
+    } finally {
+      setChallengesLoading(false)
+    }
+  }, [address])
 
   // ── Review queue ────────────────────────────────────────────────────────
   // The backend does the challengeability filtering (Postgres for metadata,
@@ -147,19 +170,23 @@ export default function LibrarianDashboard() {
   }, [address])
 
   useEffect(() => {
-    if (!address || !isLibrarian) return
+    if (!address || (!isLibrarian && !isContractOwner)) return
 
     loadQueue()
+    loadChallenges()
 
     // A book joins the queue when its archivist stakes — an event this page has
     // no other way to hear about. Silent refresh so the list does not flash a
     // spinner every minute; skipped while the tab is hidden.
     const id = setInterval(() => {
-      if (!document.hidden) loadQueue({ silent: true })
+      if (!document.hidden) {
+        loadQueue({ silent: true })
+        loadChallenges({ silent: true })
+      }
     }, POLL_INTERVAL_MS)
 
     return () => clearInterval(id)
-  }, [address, isLibrarian, loadQueue])
+  }, [address, isLibrarian, isContractOwner, loadQueue, loadChallenges])
 
   const handleStake = async () => {
     if (!stakeInput || isNaN(stakeInput)) return
@@ -247,6 +274,63 @@ export default function LibrarianDashboard() {
     }
   }
 
+  const openReviewForm = (book, vote) => {
+    setReviewForm({ hash: book.arweaveHash, vote, rationale: '', error: null, pending: false })
+  }
+
+  const handleReviewSubmit = async (book) => {
+    if (!signer || !address || !reviewForm || reviewForm.hash !== book.arweaveHash) return
+    const rationale = reviewForm.rationale.trim()
+    if (rationale.length < 10) {
+      setReviewForm((current) => ({ ...current, error: 'Add a rationale of at least 10 characters.' }))
+      return
+    }
+    const timestamp = Date.now()
+    const message = [
+      'Alexandria Challenge Review',
+      'Chain ID: 84532',
+      `Book: ${book.arweaveHash}`,
+      `Vote: ${reviewForm.vote}`,
+      `Rationale: ${rationale}`,
+      `Issued At: ${timestamp}`,
+      'This signature records one immutable librarian review; it does not resolve the on-chain challenge.',
+    ].join('\n')
+
+    setReviewForm((current) => ({ ...current, pending: true, error: null }))
+    try {
+      const signature = await signer.signMessage(message)
+      await submitChallengeReview(book.arweaveHash, {
+        librarian: address,
+        vote: reviewForm.vote,
+        rationale,
+        timestamp,
+        signature,
+      })
+      setReviewForm(null)
+      await loadChallenges({ silent: true })
+    } catch (err) {
+      setReviewForm((current) => ({ ...current, pending: false, error: err.message || 'Review could not be submitted.' }))
+    }
+  }
+
+  const handleResolveChallenge = async (book) => {
+    if (!isContractOwner || !stakeContract || !book.review.consensus) return
+    setResolutionState((current) => ({ ...current, [book.arweaveHash]: 'pending' }))
+    try {
+      // Contract argument is whether the UPLOAD is valid. An upheld challenge
+      // means invalid; dismissal means the upload should be approved.
+      const uploadApproved = book.review.consensus === 'dismiss'
+      const tx = await stakeContract.resolveChallenge(book.arweaveHash, uploadApproved, false)
+      await tx.wait()
+      setResolutionState((current) => ({ ...current, [book.arweaveHash]: 'done' }))
+      setChallenges((current) => current.filter((item) => item.arweaveHash !== book.arweaveHash))
+      await loadChallenges({ silent: true })
+    } catch (err) {
+      setResolutionState((current) => ({ ...current, [book.arweaveHash]: 'error' }))
+      console.error('Challenge resolution failed', err)
+    }
+  }
+
   const handleClaim = async () => {
     if (!address) { setShowWalletSelect(true); return }
     setClaimState('pending')
@@ -265,7 +349,7 @@ export default function LibrarianDashboard() {
 
         {!address ? (
           <ConnectWalletPrompt message="Connect your wallet to view your librarian dashboard." />
-        ) : !isLibrarian ? (
+        ) : !isLibrarian && !isContractOwner ? (
           <div className="dash__connect">
             <h2>Become a Librarian</h2>
             <p>Stake a minimum of 50 $ALEX to join the librarian network. You will be responsible for reviewing uploads and resolving challenges.</p>
@@ -425,9 +509,9 @@ export default function LibrarianDashboard() {
                               <button
                                 className="dash__challenge-btn"
                                 onClick={() => isOpen ? setChallengeOpen(null) : openChallenge(book.arweaveHash)}
-                                disabled={isPending}
+                                disabled={isPending || !isLibrarian}
                               >
-                                {isOpen ? 'Cancel' : '⚡ Challenge'}
+                                {isOpen ? 'Cancel' : isLibrarian ? '⚡ Challenge' : 'Librarian stake required'}
                               </button>
                               <button
                                 className="dash__skip-btn"
@@ -505,6 +589,130 @@ export default function LibrarianDashboard() {
                 </p>
               )}
             </div>
+
+            {/* Challenges are a separate case from pre-upload review: three
+                independent librarians submit blind, signed decisions. */}
+            <section className="dash__challenge-reviews" aria-labelledby="challenge-reviews-title">
+              <h2 className="dash__section-title" id="challenge-reviews-title">
+                Challenged Books
+                {challenges.length > 0 && <span className="dash__queue-badge">{challenges.length}</span>}
+                <button className="dash__refresh-btn" onClick={() => loadChallenges()} disabled={challengesLoading}>
+                  {challengesLoading ? 'Refreshing…' : '↻ Refresh'}
+                </button>
+              </h2>
+              <p className="dash__challenge-reviews-intro">
+                Three eligible librarians review each challenge independently. Vote directions stay hidden until all three have submitted; the majority recommendation is then available for the contract owner to resolve on-chain.
+              </p>
+              {challengeReviewsError ? (
+                <div className="dash__queue-error">Could not load challenged books — {challengeReviewsError}</div>
+              ) : challengesLoading && challenges.length === 0 ? (
+                <div className="dash__empty"><span className="dash__spinner" /> Loading challenged books…</div>
+              ) : challenges.length === 0 ? (
+                <div className="dash__empty">No unresolved challenges need review.</div>
+              ) : (
+                <div className="dash__list">
+                  {challenges.map((book) => {
+                    const ownVote = book.review.ownVote
+                    const isConflicted = [book.challenger, book.staker, book.uploader]
+                      .some((wallet) => wallet && wallet.toLowerCase() === address?.toLowerCase())
+                    const activeForm = reviewForm?.hash === book.arweaveHash
+                    const resolving = resolutionState[book.arweaveHash] === 'pending'
+                    const majority = book.review.consensus === 'uphold' ? 'Challenge upheld — upload is invalid' : 'Challenge dismissed — upload is valid'
+
+                    return (
+                      <article key={book.arweaveHash} className="dash__challenge-review-card">
+                        <div className="dash__challenge-review-heading">
+                          <div>
+                            <h3>{book.title}</h3>
+                            <p>{book.author} · challenged by {truncate(book.challenger)}</p>
+                          </div>
+                          <Link to={`/read/${book.arweaveHash}`} className="dash__inspect-btn">📖 Inspect book</Link>
+                        </div>
+                        <div className="dash__challenge-reason">
+                          <strong>Challenge reason</strong>
+                          <p>{book.challengeReason}</p>
+                        </div>
+                        <div className="dash__review-progress">
+                          <strong>{book.review.submitted} / {book.review.required} independent reviews</strong>
+                          {book.review.consensus ? (
+                            <div className="dash__review-consensus">
+                              <span>{majority}</span>
+                              <span>{book.review.votes.uphold} uphold · {book.review.votes.dismiss} dismiss</span>
+                            </div>
+                          ) : (
+                            <span>Votes remain blind until all three reviews are in.</span>
+                          )}
+                        </div>
+
+                        {book.review.ballots && (
+                          <div className="dash__review-ballots">
+                            {book.review.ballots.map((ballot) => (
+                              <div key={ballot.reviewer}>
+                                <strong>{ballot.vote === 'uphold' ? 'Upheld challenge' : 'Dismissed challenge'}</strong>
+                                <span> · {truncate(ballot.reviewer)} — {ballot.rationale}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {ownVote ? (
+                          <p className="dash__review-locked">Your signed vote ({ownVote.vote}) is recorded and immutable.</p>
+                        ) : book.review.submitted >= book.review.required ? (
+                          <p className="dash__review-locked">Review complete.</p>
+                        ) : isConflicted ? (
+                          <p className="dash__review-locked">The challenger and the uploader/staker cannot review this case.</p>
+                        ) : !isLibrarian ? (
+                          <p className="dash__review-locked">An active librarian stake is required to submit a review.</p>
+                        ) : (
+                          <div className="dash__review-actions">
+                            <button className="dash__review-uphold" onClick={() => openReviewForm(book, 'uphold')} disabled={activeForm}>
+                              Uphold challenge
+                            </button>
+                            <button className="dash__review-dismiss" onClick={() => openReviewForm(book, 'dismiss')} disabled={activeForm}>
+                              Dismiss challenge
+                            </button>
+                          </div>
+                        )}
+
+                        {activeForm && (
+                          <div className="dash__review-form">
+                            <strong>{reviewForm.vote === 'uphold' ? 'Vote to uphold this challenge' : 'Vote to dismiss this challenge'}</strong>
+                            <label>
+                              Independent rationale (min 10 characters)
+                              <textarea
+                                value={reviewForm.rationale}
+                                maxLength={1000}
+                                rows={3}
+                                onChange={(event) => setReviewForm((current) => ({ ...current, rationale: event.target.value }))}
+                              />
+                            </label>
+                            {reviewForm.error && <p className="dash__challenge-error">{reviewForm.error}</p>}
+                            {reviewForm.pending ? (
+                              <div className="dash__claim-pending"><span className="dash__spinner" /> Sign in your wallet, then submitting review…</div>
+                            ) : (
+                              <div className="dash__queue-actions">
+                                <button className="dash__challenge-submit" onClick={() => handleReviewSubmit(book)}>Sign & submit review</button>
+                                <button className="dash__skip-btn" onClick={() => setReviewForm(null)}>Cancel</button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {isContractOwner && book.review.consensus && (
+                          <div className="dash__owner-resolution">
+                            <p>The deployed contract allows only its owner to execute the final resolution.</p>
+                            <button className="dash__challenge-submit" onClick={() => handleResolveChallenge(book)} disabled={resolving}>
+                              {resolving ? 'Waiting for chain…' : 'Resolve on-chain from consensus'}
+                            </button>
+                            {resolutionState[book.arweaveHash] === 'error' && <span className="dash__challenge-error">Resolution failed. Check the transaction and try again.</span>}
+                          </div>
+                        )}
+                      </article>
+                    )
+                  })}
+                </div>
+              )}
+            </section>
           </>
         )}
       </div>
