@@ -11,7 +11,7 @@ const CATEGORIES = [
   { slug: 'mathematics',  label: 'Mathematics',  icon: '∑',   count: 678  },
   { slug: 'technology',   label: 'Technology',   icon: '⚙️',  count: 945  },
   { slug: 'medicine',     label: 'Medicine',     icon: '⚕',   count: 731  },
-  { slug: 'arts',         label: 'Arts',         icon: '🎨',  count: 312  },
+  { slug: 'art',          label: 'Art',          icon: '🎨',  count: 312  },
 ]
 
 const STEPS = [
