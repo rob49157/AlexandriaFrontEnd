@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import * as pdfjsLib from 'pdfjs-dist'
 import { PDFDocument, rgb, StandardFonts, degrees } from 'pdf-lib'
 import { useWallet } from '../context/WalletContext'
+import WalletSelectModal from '../components/WalletSelectModal'
 import { getUpload, getDecryptParams, getEncryptedBook } from '../services/api'
 import { unlockBookKey } from '../services/lit'
 import { decryptPdfInBrowser, zeroMemory } from '../services/decryption'
@@ -76,7 +77,8 @@ function Countdown({ expiryMs }) {
 export default function Reader() {
   const { arweaveHash } = useParams()
   const navigate        = useNavigate()
-  const { address, signer } = useWallet()
+  const { address, signer, restoring } = useWallet()
+  const [showWalletSelect, setShowWalletSelect] = useState(false)
 
   const [bookTitle,    setBookTitle]    = useState('')
   // Read once. Recomputing Date.now() on every render made this a new value each
@@ -110,6 +112,9 @@ export default function Reader() {
 
   // ── Loading pipeline ──
   useEffect(() => {
+    // After a reload the wallet reconnects a moment after first render. Wait for
+    // it instead of failing with "connect your wallet".
+    if (restoring) return undefined
     let cancelled = false
 
     const run = async () => {
@@ -252,7 +257,7 @@ export default function Reader() {
         pdfBytesRef.current = null
       }
     }
-  }, [arweaveHash, address, signer, rentalExpiry])
+  }, [arweaveHash, address, signer, rentalExpiry, restoring])
 
   // ── Render page on canvas ──
   useEffect(() => {
@@ -354,6 +359,7 @@ export default function Reader() {
   }
 
   if (loadPhase === 'error') {
+    const btnStyle = { background: 'var(--accent)', border: 'none', borderRadius: '8px', color: '#0a0a12', fontWeight: 700, padding: '0.625rem 1.5rem', cursor: 'pointer' }
     return (
       <div className="reader-load">
         <div className="reader-load__card">
@@ -361,9 +367,16 @@ export default function Reader() {
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '1.5rem', lineHeight: 1.5 }}>
             {loadError}
           </p>
-          <button onClick={goBack} style={{ background: 'var(--accent)', border: 'none', borderRadius: '8px', color: '#0a0a12', fontWeight: 700, padding: '0.625rem 1.5rem', cursor: 'pointer' }}>
+          {/* This page has no navbar, so a wallet that didn't reconnect (e.g. locked) connects here */}
+          {!address && (
+            <button onClick={() => setShowWalletSelect(true)} style={{ ...btnStyle, marginRight: '0.75rem' }}>
+              Connect Wallet
+            </button>
+          )}
+          <button onClick={goBack} style={btnStyle}>
             ← Back to Book
           </button>
+          {showWalletSelect && <WalletSelectModal onClose={() => setShowWalletSelect(false)} />}
         </div>
       </div>
     )
