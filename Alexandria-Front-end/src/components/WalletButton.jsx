@@ -9,7 +9,7 @@ function truncate(addr) {
 }
 
 export default function WalletButton() {
-  const { address, isCorrectNetwork, switchToBaseSepolia } = useWallet()
+  const { address, isCorrectNetwork, restoring, switchToBaseSepolia } = useWallet()
   const [showSelect, setShowSelect] = useState(false)
   const [showInfo,   setShowInfo]   = useState(false)
 
@@ -42,8 +42,8 @@ export default function WalletButton() {
 
   return (
     <>
-      <button className="wallet-btn wallet-btn--connect" onClick={() => setShowSelect(true)}>
-        Connect Wallet
+      <button className="wallet-btn wallet-btn--connect" onClick={() => setShowSelect(true)} disabled={restoring}>
+        {restoring ? 'Reconnecting…' : 'Connect Wallet'}
       </button>
 
       {showSelect && (

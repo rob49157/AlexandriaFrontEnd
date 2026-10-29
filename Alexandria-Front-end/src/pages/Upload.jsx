@@ -8,18 +8,8 @@ import { uploadPdf, getStorageProgress, retryRegistration, getUploadQuota } from
 import { buildUploadMessage, randomNonce, sha256Hex, toIsoSeconds, UPLOAD_WINDOW_SECONDS } from '../services/unlockMessage'
 import { isUserRejection } from '../utils/walletErrors'
 import { ADDRESSES } from '../config/contracts'
+import { CATEGORIES } from '../utils/constants'
 import '../styles/Upload.css'
-
-const CATEGORIES = [
-  { slug: 'science',     label: 'Science'     },
-  { slug: 'history',     label: 'History'     },
-  { slug: 'philosophy',  label: 'Philosophy'  },
-  { slug: 'literature',  label: 'Literature'  },
-  { slug: 'mathematics', label: 'Mathematics' },
-  { slug: 'technology',  label: 'Technology'  },
-  { slug: 'medicine',    label: 'Medicine'    },
-  { slug: 'arts',        label: 'Arts'        },
-]
 
 const STAKE_AMOUNT = 100
 const STAKE_DAYS   = 14

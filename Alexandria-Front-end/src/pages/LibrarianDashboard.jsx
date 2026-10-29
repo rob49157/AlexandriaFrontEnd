@@ -7,18 +7,8 @@ import WalletSelectModal from '../components/WalletSelectModal'
 import { useContracts } from '../hooks/useContracts'
 import { AuditBadges, AuditSummary } from '../components/AuditBadges'
 import { getReviewQueue } from '../services/api'
+import { categoryStyle } from '../utils/constants'
 import '../styles/Dashboard.css'
-
-const CATEGORY_STYLE = {
-  science:     { color: '#5b8dee', bg: 'rgba(91, 141, 238, 0.08)'  },
-  history:     { color: '#c9894c', bg: 'rgba(201, 137, 76, 0.08)'  },
-  philosophy:  { color: '#a97dcf', bg: 'rgba(169, 125, 207, 0.08)' },
-  literature:  { color: '#c9a84c', bg: 'rgba(201, 168, 76, 0.08)'  },
-  mathematics: { color: '#4caf7a', bg: 'rgba(76, 175, 122, 0.08)'  },
-  technology:  { color: '#4cb8c4', bg: 'rgba(76, 184, 196, 0.08)'  },
-  medicine:    { color: '#e06060', bg: 'rgba(224, 96, 96, 0.08)'   },
-  arts:        { color: '#c94ca8', bg: 'rgba(201, 76, 168, 0.08)'  },
-}
 
 const CLAIMABLE = 18.5
 
@@ -373,7 +363,7 @@ export default function LibrarianDashboard() {
               ) : (
                 <div className="dash__list">
                   {visibleQueue.map(book => {
-                    const cs = CATEGORY_STYLE[book.category] || { color: 'var(--accent)', bg: 'var(--accent-dim)' }
+                    const cs = categoryStyle(book.category)
                     const initials = book.title.split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase()
                     const isOpen   = challengeOpen === book.arweaveHash
                     const isPending = challengeStates[book.arweaveHash] === 'pending'

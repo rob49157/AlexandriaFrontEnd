@@ -6,7 +6,7 @@ import WalletSelectModal from './WalletSelectModal'
 // It owns the wallet picker so a failed connect shows an error instead of
 // looking like a dead button.
 export default function ConnectWalletPrompt({ message }) {
-  const { connecting, error } = useWallet()
+  const { connecting, restoring, error } = useWallet()
   const [showSelect, setShowSelect] = useState(false)
 
   return (
@@ -16,9 +16,9 @@ export default function ConnectWalletPrompt({ message }) {
       <button
         className="dash__connect-btn"
         onClick={() => setShowSelect(true)}
-        disabled={connecting}
+        disabled={connecting || restoring}
       >
-        {connecting ? 'Connecting…' : 'Connect Wallet'}
+        {restoring ? 'Reconnecting…' : connecting ? 'Connecting…' : 'Connect Wallet'}
       </button>
 
       {showSelect && <WalletSelectModal onClose={() => setShowSelect(false)} />}

@@ -3,18 +3,8 @@ import { Link } from 'react-router-dom'
 import { useWallet } from '../context/WalletContext'
 import ConnectWalletPrompt from '../components/ConnectWalletPrompt'
 import { searchBooks } from '../services/api'
+import { categoryStyle } from '../utils/constants'
 import '../styles/Dashboard.css'
-
-const CATEGORY_STYLE = {
-  science:     { color: '#5b8dee', bg: 'rgba(91, 141, 238, 0.08)'  },
-  history:     { color: '#c9894c', bg: 'rgba(201, 137, 76, 0.08)'  },
-  philosophy:  { color: '#a97dcf', bg: 'rgba(169, 125, 207, 0.08)' },
-  literature:  { color: '#c9a84c', bg: 'rgba(201, 168, 76, 0.08)'  },
-  mathematics: { color: '#4caf7a', bg: 'rgba(76, 175, 122, 0.08)'  },
-  technology:  { color: '#4cb8c4', bg: 'rgba(76, 184, 196, 0.08)'  },
-  medicine:    { color: '#e06060', bg: 'rgba(224, 96, 96, 0.08)'   },
-  arts:        { color: '#c94ca8', bg: 'rgba(201, 76, 168, 0.08)'  },
-}
 
 const STATUS_CONFIG = {
   // Before pending_stake: the storage worker is confirming the Arweave upload
@@ -112,7 +102,7 @@ export default function ArchivistDashboard() {
               ) : (
                 <div className="dash__list">
                   {displayedUploads.map(upload => {
-                    const cs = CATEGORY_STYLE[upload.category?.toLowerCase()] || { color: 'var(--accent)', bg: 'var(--accent-dim)' }
+                    const cs = categoryStyle(upload.category?.toLowerCase())
                     const ss = STATUS_CONFIG[upload.status] || { label: upload.status || 'Pending', color: '#5b8dee', bg: 'rgba(91,141,238,0.12)' }
                     const initials = upload.title.split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase()
 
