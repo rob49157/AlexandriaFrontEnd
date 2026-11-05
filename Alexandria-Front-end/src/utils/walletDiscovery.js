@@ -73,6 +73,24 @@ export function getWallet(id) {
   return getSnapshot().find(w => w.id === id) ?? null
 }
 
+// Resolves with the wallet once it has announced itself, or null after timeoutMs.
+// Wallets and this script load in no fixed order (EIP-6963), so the wallet
+// remembered from the last visit may not have announced yet on first render.
+export function waitForWallet(id, timeoutMs) {
+  const now = getWallet(id)
+  if (now) return Promise.resolve(now)
+  return new Promise(resolve => {
+    const unsubscribe = subscribe(() => {
+      const found = getWallet(id)
+      if (!found) return
+      clearTimeout(timer)
+      unsubscribe()
+      resolve(found)
+    })
+    const timer = setTimeout(() => { unsubscribe(); resolve(null) }, timeoutMs)
+  })
+}
+
 const EMPTY = []
 
 export function useWallets() {

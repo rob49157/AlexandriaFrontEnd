@@ -3,19 +3,8 @@ import { useSearchParams } from 'react-router-dom'
 import SearchBar from '../components/SearchBar'
 import BookCard from '../components/BookCard'
 import { searchBooks } from '../services/api'
-import { MOCK_BOOKS } from '../data/mockBooks'
+import { CATEGORIES } from '../utils/constants'
 import '../styles/Search.css'
-
-const CATEGORIES = [
-  { slug: 'science',     label: 'Science'     },
-  { slug: 'history',     label: 'History'     },
-  { slug: 'philosophy',  label: 'Philosophy'  },
-  { slug: 'literature',  label: 'Literature'  },
-  { slug: 'mathematics', label: 'Mathematics' },
-  { slug: 'technology',  label: 'Technology'  },
-  { slug: 'medicine',    label: 'Medicine'    },
-  { slug: 'arts',        label: 'Arts'        },
-]
 
 const SORT_OPTIONS = [
   { value: 'newest',      label: 'Newest First'      },
@@ -31,15 +20,18 @@ export default function Search() {
   const [books, setBooks] = useState([])
   const [loading, setLoading] = useState(true)
   const [totalCount, setTotalCount] = useState(0)
+  const [error, setError] = useState(null)
+  const [retryTick, setRetryTick] = useState(0) // bump to search again
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
+    setError(null)
 
     async function loadResults() {
       try {
-        // Query backend search API
-        const data = await searchBooks({ q, category, status: '', page: 1, limit: 50 })
+        // Approved books plus staked ones still in their 14-day review
+        const data = await searchBooks({ q, category, inReview: true, page: 1, limit: 50 })
         if (cancelled) return
 
         if (data && Array.isArray(data.results)) {
@@ -54,22 +46,11 @@ export default function Search() {
           setTotalCount(0)
         }
       } catch (err) {
-        console.warn('Backend search unreachable, falling back to mock catalog:', err.message)
+        // Say so rather than showing mock books, which looked like a real catalogue
         if (cancelled) return
-        // Fallback filter over mock data for local testing
-        let results = MOCK_BOOKS
-        if (q) {
-          const lower = q.toLowerCase()
-          results = results.filter(b =>
-            b.title.toLowerCase().includes(lower) ||
-            b.author.toLowerCase().includes(lower)
-          )
-        }
-        if (category) {
-          results = results.filter(b => b.category === category)
-        }
-        setBooks(results)
-        setTotalCount(results.length)
+        setBooks([])
+        setTotalCount(0)
+        setError(err.message || 'The search service did not answer.')
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -77,7 +58,7 @@ export default function Search() {
 
     loadResults()
     return () => { cancelled = true }
-  }, [q, category, sort])
+  }, [q, category, sort, retryTick])
 
   const setFilter = (key, value) => {
     const next = new URLSearchParams(params)
@@ -96,6 +77,7 @@ export default function Search() {
 
   const countLabel = (() => {
     if (loading) return 'Searching catalogue…'
+    if (error) return 'Search unavailable'
     const n = totalCount
     const suffix = n !== 1 ? 's' : ''
     const queryPart = q ? ` for "${q}"` : ''
@@ -168,20 +150,43 @@ export default function Search() {
             <div style={{ textAlign: 'center', padding: '4rem 0', color: 'var(--text-secondary)' }}>
               Loading catalogue...
             </div>
-          ) : books.length === 0 ? (
+          ) : error ? (
             <div className="search__empty">
-              <span className="search__empty-icon">📚</span>
-              <p className="search__empty-title">No books found</p>
-              <p className="search__empty-sub">
-                Try a different search term or browse all categories.
-              </p>
+              <p className="search__empty-title">Couldn't reach the catalogue</p>
+              <p className="search__empty-sub">{error}</p>
               <button
                 className="search__clear-btn"
                 style={{ width: 'auto', padding: '0.45rem 1.25rem' }}
-                onClick={() => setParams({})}
+                onClick={() => setRetryTick(t => t + 1)}
               >
-                Clear all
+                Try again
               </button>
+            </div>
+          ) : books.length === 0 ? (
+            <div className="search__empty">
+              <span className="search__empty-icon">📚</span>
+              {q || category ? (
+                <>
+                  <p className="search__empty-title">No books found</p>
+                  <p className="search__empty-sub">
+                    Try a different search term or browse all categories.
+                  </p>
+                  <button
+                    className="search__clear-btn"
+                    style={{ width: 'auto', padding: '0.45rem 1.25rem' }}
+                    onClick={() => setParams({})}
+                  >
+                    Clear all
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="search__empty-title">The catalogue is empty</p>
+                  <p className="search__empty-sub">
+                    Books appear here once their archivist stakes them for review.
+                  </p>
+                </>
+              )}
             </div>
           ) : (
             <div className="search__grid">

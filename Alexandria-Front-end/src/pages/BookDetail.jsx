@@ -7,17 +7,23 @@ import { useContracts } from '../hooks/useContracts'
 import { getUpload, getRentalStatus, getBookRentalInfo } from '../services/api'
 import { ADDRESSES } from '../config/contracts'
 import { MOCK_BOOKS } from '../data/mockBooks'
+import { categoryLabel, categoryStyle } from '../utils/constants'
+import { reviewLabel } from '../utils/formatters'
 import '../styles/BookDetail.css'
 
-const CATEGORY_STYLE = {
-  science:     { color: '#5b8dee', bg: 'rgba(91, 141, 238, 0.08)' },
-  history:     { color: '#c9894c', bg: 'rgba(201, 137, 76, 0.08)' },
-  philosophy:  { color: '#a97dcf', bg: 'rgba(169, 125, 207, 0.08)' },
-  literature:  { color: '#c9a84c', bg: 'rgba(201, 168, 76, 0.08)' },
-  mathematics: { color: '#4caf7a', bg: 'rgba(76, 175, 122, 0.08)' },
-  technology:  { color: '#4cb8c4', bg: 'rgba(76, 184, 196, 0.08)' },
-  medicine:    { color: '#e06060', bg: 'rgba(224, 96, 96, 0.08)' },
-  arts:        { color: '#c94ca8', bg: 'rgba(201, 76, 168, 0.08)' },
+// Why GET /rental/book answered rentable: false. Mirrors the checks in
+// Rent.rentBook(): Approved status, a price above 0, and not delisted.
+function notRentableReason(book, rentalInfo) {
+  if (rentalInfo.delisted) return 'This book was delisted and can no longer be rented.'
+  if (rentalInfo.onChainStatus === 'pending') {
+    return book.reviewEndsAt
+      ? 'It can be rented once its 14-day review is over and the archivist sets a price.'
+      : 'Registered, but not staked yet. The 14-day review starts once the archivist stakes it.'
+  }
+  if (rentalInfo.onChainStatus === 'challenged') return 'A librarian has challenged this book. Rentals wait for the decision.'
+  if (rentalInfo.onChainStatus === 'rejected') return 'This book was rejected after a challenge and cannot be rented.'
+  if (rentalInfo.onChainStatus === 'approved' && !rentalInfo.priceSet) return "Approved, but the archivist hasn't set a rental price yet."
+  return "This book can't be rented right now."
 }
 
 // Contract-supported durations in Rent.sol
@@ -167,14 +173,15 @@ export default function BookDetail() {
     )
   }
 
-  const categoryKey   = book.category?.toLowerCase() || 'literature'
-  const style         = CATEGORY_STYLE[categoryKey] || { color: 'var(--accent)', bg: 'var(--accent-dim)' }
+  const style         = categoryStyle(book.category?.toLowerCase())
   const initials      = book.title.split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase()
   const pricePerDay   = Number(rentalInfo?.pricePerDayAlex || 1)
   const totalPrice    = pricePerDay * selectedDuration.days
-  const categoryLabel = book.category ? book.category.charAt(0).toUpperCase() + book.category.slice(1) : 'General'
   const isRented      = isUploader || Boolean(rentalExpiry && rentalExpiry > Date.now())
   const isPending     = txState === 'approving' || txState === 'renting'
+  // Only when the chain answered: without rentalInfo the rent box stays as it was
+  const notRentable   = Boolean(rentalInfo && !rentalInfo.rentable)
+  const inReview      = book.status === 'pending' && Boolean(book.reviewEndsAt)
 
   return (
     <main className="book-detail">
@@ -226,7 +233,7 @@ export default function BookDetail() {
               className="book-detail__category"
               style={{ color: style.color, background: style.bg }}
             >
-              {categoryLabel}
+              {categoryLabel(book.category?.toLowerCase())}
             </span>
 
             <h1 className="book-detail__title">{book.title}</h1>
@@ -259,6 +266,12 @@ export default function BookDetail() {
                     Read Book →
                   </Link>
                 </>
+              ) : notRentable ? (
+                // Renting would revert on-chain, after the reader has already approved $ALEX
+                <div className="book-detail__unavailable">
+                  {inReview && <span className="book-detail__unavailable-title">{reviewLabel(book.reviewEndsAt)}</span>}
+                  <span>{notRentableReason(book, rentalInfo)}</span>
+                </div>
               ) : (
                 <>
                   <div className="book-detail__durations">

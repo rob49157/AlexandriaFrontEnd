@@ -1,9 +1,19 @@
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { BrowserProvider, JsonRpcSigner } from 'ethers'
-import { getWallet, getWallets } from '../utils/walletDiscovery'
+import { getWallet, getWallets, waitForWallet } from '../utils/walletDiscovery'
 
 const BASE_SEPOLIA_CHAIN_ID = 84532
 const BASE_SEPOLIA_HEX = '0x14a34'
+
+// The wallet (EIP-6963 rdns) to reconnect to after a reload. Only the wallet,
+// never the address: the wallet says which account is current. Per browser, best effort.
+const WALLET_KEY = 'alexandria:wallet'
+const rememberWallet = (id) => { try { localStorage.setItem(WALLET_KEY, id) } catch { /* private mode */ } }
+const forgetWallet   = ()   => { try { localStorage.removeItem(WALLET_KEY) } catch { /* private mode */ } }
+const recallWallet   = ()   => { try { return localStorage.getItem(WALLET_KEY) } catch { return null } }
+
+// How long a reload waits for the remembered wallet before showing Connect
+const RESTORE_TIMEOUT_MS = 2000
 
 const WalletContext = createContext(null)
 
@@ -29,8 +39,10 @@ export function WalletProvider({ children }) {
   const [connecting,       setConnecting]       = useState(false)
   const [error,            setError]            = useState(null)
   const [isCorrectNetwork, setIsCorrectNetwork] = useState(false)
+  const [restoring,        setRestoring]        = useState(() => recallWallet() !== null) // reconnecting after a reload
 
-  const inFlight = useRef(false) // guards against overlapping connect requests
+  const inFlight  = useRef(false) // guards against overlapping connect requests
+  const userActed = useRef(false) // the user connected or disconnected; a slow reconnect must not undo it
 
   // Derived so it always matches the current account and network.
   // Built from the address directly: p.getSigner() would re-check eth_accounts
@@ -47,8 +59,24 @@ export function WalletProvider({ children }) {
     return ok
   }, [])
 
+  // ── Adopt an account the wallet has handed over ──────────────────
+  const adopt = useCallback(async (found, p, addr) => {
+    const net = await p.getNetwork()
+    const netId = Number(net.chainId)
+
+    setProvider(p)
+    setRawProvider(found.provider)
+    setAddress(addr)
+    setChainId(netId)
+    setWallet({ id: found.id, name: found.name, icon: found.icon })
+    checkNetwork(netId)
+  }, [checkNetwork])
+
   // ── Disconnect ───────────────────────────────────────────────────
-  const disconnect = useCallback(() => {
+  // The app's side only. Also what happens when the wallet drops the account
+  // itself (locked, or this site removed in the wallet): the wallet stays
+  // remembered, so the next reload reconnects once it is unlocked.
+  const clearConnection = useCallback(() => {
     setAddress(null)
     setProvider(null)
     setRawProvider(null)
@@ -57,6 +85,18 @@ export function WalletProvider({ children }) {
     setIsCorrectNetwork(false)
     setError(null)
   }, [])
+
+  // The Disconnect button: forget the wallet so a reload doesn't reconnect, and
+  // ask the wallet to drop this site too. MetaMask's extension supports
+  // wallet_revokePermissions; a wallet that doesn't is still disconnected here.
+  const disconnect = useCallback(() => {
+    userActed.current = true
+    forgetWallet()
+    if (rawProvider) {
+      rawProvider.request({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }).catch(() => {})
+    }
+    clearConnection()
+  }, [rawProvider, clearConnection])
 
   // ── Switch / Add Base Sepolia ────────────────────────────────────
   const switchToBaseSepolia = useCallback(async () => {
@@ -107,6 +147,7 @@ export function WalletProvider({ children }) {
       return false
     }
 
+    userActed.current = true
     inFlight.current = true
     setConnecting(true)
     setError(null)
@@ -117,15 +158,8 @@ export function WalletProvider({ children }) {
       const addr = accounts?.[0]
       if (!addr) throw new Error('No accounts returned. Unlock your wallet and try again.')
 
-      const net = await p.getNetwork()
-      const netId = Number(net.chainId)
-
-      setProvider(p)
-      setRawProvider(raw)
-      setAddress(addr)
-      setChainId(netId)
-      setWallet({ id: found.id, name: found.name, icon: found.icon })
-      checkNetwork(netId)
+      await adopt(found, p, addr)
+      rememberWallet(found.id)
       return true
     } catch (err) {
       setError(connectErrorMessage(err))
@@ -134,10 +168,40 @@ export function WalletProvider({ children }) {
       inFlight.current = false
       setConnecting(false)
     }
-  }, [checkNetwork])
+  }, [adopt])
 
   // Connect to the first discovered wallet
   const connect = useCallback(() => connectWith(getWallets()[0]?.id), [connectWith])
+
+  // ── Reconnect after a reload ─────────────────────────────────────
+  // eth_accounts answers without a prompt: the account if this site is still
+  // approved and the wallet unlocked, [] otherwise. Only eth_requestAccounts,
+  // from a click on Connect, may open the wallet.
+  useEffect(() => {
+    const id = recallWallet()
+    if (!id) return undefined
+    let cancelled = false
+    // A wallet that never answers must not leave Connect hidden behind "Reconnecting…"
+    const giveUp = setTimeout(() => setRestoring(false), RESTORE_TIMEOUT_MS)
+
+    const restore = async () => {
+      const found = await waitForWallet(id, RESTORE_TIMEOUT_MS)
+      if (cancelled || !found) return
+      const p = new BrowserProvider(found.provider)
+      const accounts = await p.send('eth_accounts', [])
+      if (cancelled || userActed.current || !accounts?.[0]) return
+      await adopt(found, p, accounts[0])
+    }
+
+    restore()
+      .catch(() => { /* stay disconnected; Connect still works */ })
+      .finally(() => {
+        clearTimeout(giveUp)
+        if (!cancelled) setRestoring(false)
+      })
+
+    return () => { cancelled = true; clearTimeout(giveUp) }
+  }, [adopt])
 
   // ── Listen for account & network changes ─────────────────────────
   useEffect(() => {
@@ -149,7 +213,7 @@ export function WalletProvider({ children }) {
     // The derived signer follows the new address automatically
     const onAccountsChanged = (accounts) => {
       if (!accounts || accounts.length === 0) {
-        disconnect()
+        clearConnection()
       } else {
         setAddress(accounts[0])
       }
@@ -171,12 +235,12 @@ export function WalletProvider({ children }) {
       rawProvider.removeListener('accountsChanged', onAccountsChanged)
       rawProvider.removeListener('chainChanged', onChainChanged)
     }
-  }, [rawProvider, disconnect, checkNetwork])
+  }, [rawProvider, clearConnection, checkNetwork])
 
   return (
     <WalletContext.Provider value={{
       address, provider, signer, chainId, wallet,
-      connecting, error, isCorrectNetwork,
+      connecting, restoring, error, isCorrectNetwork,
       connect, connectWith, disconnect, switchToBaseSepolia,
     }}>
       {children}

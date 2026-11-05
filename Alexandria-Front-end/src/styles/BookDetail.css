@@ -335,6 +335,25 @@
   opacity: 0.7;
 }
 
+/* Not rentable yet: in review, no price, delisted… */
+.book-detail__unavailable {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  padding: 0.875rem 1rem;
+  background: var(--accent-dim);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-sm);
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.book-detail__unavailable-title {
+  font-weight: 600;
+  color: var(--accent);
+}
+
 /* Wallet note */
 .book-detail__wallet-note {
   font-size: 0.8125rem;

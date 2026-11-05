@@ -30,14 +30,17 @@ async function fetchJson(endpoint, options = {}) {
 }
 
 /**
- * Search the public catalogue
- * @param {{ q?: string, category?: string, status?: string, page?: number, limit?: number }} params
+ * Search the public catalogue. Approved books only, unless `inReview` also asks
+ * for staked books still inside their 14-day challenge window (not rentable yet;
+ * each carries `reviewEndsAt`). `inReview` and `status` are mutually exclusive.
+ * @param {{ q?: string, category?: string, status?: string, inReview?: boolean, page?: number, limit?: number }} params
  */
-export async function searchBooks({ q = '', category = '', status = '', page = 1, limit = 20 } = {}) {
+export async function searchBooks({ q = '', category = '', status = '', inReview = false, page = 1, limit = 20 } = {}) {
   const query = new URLSearchParams();
   if (q) query.set('q', q);
   if (category) query.set('category', category);
   if (status) query.set('status', status);
+  if (inReview) query.set('inReview', 'true');
   if (page) query.set('page', String(page));
   if (limit) query.set('limit', String(limit));
 
