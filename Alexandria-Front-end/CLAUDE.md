@@ -54,6 +54,14 @@ This app handles:
 6. Frontend calls stake.stake(arweaveHash, 100 ALEX) — archivist signs
 7. Backend event listener picks up on-chain Staked event → updates status
 8. Display confirmation with arweaveHash and stake status
+
+=== 14-DAY CHALLENGE WINDOW (starts at the stake, stake.sol CHALLENGE_PERIOD) ===
+9. Librarians may read the book (Lit Action review door) and challenge it
+10. No challenge by the end → Archivist dashboard shows "Publish & reclaim stake"
+    (GET /api/stake/archivist/:address → canPublish) → stake.unstake(arweaveHash),
+    archivist signs → book Approved (rentable), stake returned, upload reward paid.
+    Nothing approves it automatically: only the staker can call unstake()
+11. Challenged → see Challenge Flow
 ```
 
 ### Rental Flow (Reader)
@@ -96,11 +104,22 @@ This app handles:
 ### Challenge Flow (Librarian)
 ```
 1. Librarian views pending/flagged uploads on dashboard
-2. Librarian reviews content and decides to challenge
+2. Librarian reviews content and decides to challenge (inside the 14-day window)
 3. Frontend calls stake.challengeUpload(arweaveHash, reason) — librarian signs
 4. Upload status changes to "challenged" on-chain
-5. Admin/DAO resolves challenge → stake released or slashed
-6. Librarian claims rewards: stake.claimLibrarianRewards() — librarian signs
+5. Review: 14 MORE days counted from the challenge. Active librarians (not the
+   challenger, uploader or staker) may open the book (Lit Action review door) and
+   each submit one wallet-signed vote, uphold or dismiss
+   (POST /api/librarian/challenges/:hash/reviews, stored off-chain). Votes stay
+   blind until 3 are in or the 14 days end; then reading and voting close
+6. Recommendation: 2 of 3, or after the deadline the majority of votes cast
+   (tie or no votes → dismiss). Advisory: the contract does not read it
+7. Contract owner resolves on-chain from the dashboard:
+   stake.resolveChallenge(hash, approved = consensus === 'dismiss', false)
+   → dismissed: book Approved, stake returned, challenger loses 50% of its stake
+   → upheld: archivist's stake slashed (70% challenger, 30% burned), book Rejected
+8. Librarian claims rewards: stake.claimLibrarianRewards() — librarian signs
+   (dashboard button is still a placeholder)
 ```
 
 ## Environment & Tooling

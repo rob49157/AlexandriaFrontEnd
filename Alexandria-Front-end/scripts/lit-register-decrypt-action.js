@@ -191,7 +191,7 @@ async function main() {
     name: 'alexandria-decrypt',
     description:
       'Releases the AES key for an Alexandria book to an active renter, the uploader, ' +
-      'or a librarian reviewing it inside its challenge window.',
+      'or a librarian reviewing it: inside its challenge window, or for 14 days after a challenge.',
   });
 
   console.log(`\n4. Add action to group ${GROUP_ID}...`);

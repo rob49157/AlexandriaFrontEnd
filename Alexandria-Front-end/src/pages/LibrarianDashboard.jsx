@@ -36,18 +36,18 @@ function timeAgo(isoDate) {
  * wired up yet). The deadline is the number that actually governs the librarian:
  * past it, challengeUpload() reverts with "Challenge period expired".
  */
-function challengeWindow(endsAt) {
+function challengeWindow(endsAt, { open = 'left to challenge', closed = 'window expired' } = {}) {
   if (!endsAt) return { text: '—', sub: 'no deadline', color: 'var(--text-muted)' }
 
   const msLeft = new Date(endsAt).getTime() - Date.now()
-  if (msLeft <= 0) return { text: 'closed', sub: 'window expired', color: '#e06060' }
+  if (msLeft <= 0) return { text: 'closed', sub: closed, color: '#e06060' }
 
   const hours = Math.floor(msLeft / 3_600_000)
   const days = Math.floor(hours / 24)
 
   return {
     text: days >= 1 ? `${days}d ${hours % 24}h` : `${hours}h`,
-    sub: 'left to challenge',
+    sub: open,
     // Under a day is the last chance to act on this book, ever.
     color: hours < 24 ? '#eab308' : 'var(--text-secondary)',
   }
@@ -591,7 +591,7 @@ export default function LibrarianDashboard() {
                 </button>
               </h2>
               <p className="dash__challenge-reviews-intro">
-                Three eligible librarians review each challenge independently. Vote directions stay hidden until all three have submitted; the majority recommendation is then available for the contract owner to resolve on-chain.
+                Three eligible librarians review each challenge independently, within 14 days of the challenge. Vote directions stay hidden until all three have submitted or the 14 days are up. The majority of the votes cast is then the recommendation for the contract owner to resolve on-chain; a tie or no votes dismisses the challenge.
               </p>
               {challengeReviewsError ? (
                 <div className="dash__queue-error">Could not load challenged books — {challengeReviewsError}</div>
@@ -608,6 +608,11 @@ export default function LibrarianDashboard() {
                     const activeForm = reviewForm?.hash === book.arweaveHash
                     const resolving = resolutionState[book.arweaveHash] === 'pending'
                     const majority = book.review.consensus === 'uphold' ? 'Challenge upheld — upload is invalid' : 'Challenge dismissed — upload is valid'
+                    // 14 days from the challenge. After it, the Lit Action no
+                    // longer opens the book for review and the backend refuses votes.
+                    const reviewClosed = book.review.closed === true
+                    const reviewWin = challengeWindow(book.reviewEndsAt, { open: 'left to review', closed: 'review period ended' })
+                    const decidedEarly = reviewClosed && book.review.submitted < book.review.required
 
                     return (
                       <article key={book.arweaveHash} className="dash__challenge-review-card">
@@ -616,7 +621,15 @@ export default function LibrarianDashboard() {
                             <h3>{book.title}</h3>
                             <p>{book.author} · challenged by {truncate(book.challenger)}</p>
                           </div>
-                          <Link to={`/read/${book.arweaveHash}`} className="dash__inspect-btn">📖 Inspect book</Link>
+                          <div className="dash__challenge-review-side">
+                            <div className="dash__window" style={{ color: reviewWin.color }}>
+                              <span className="dash__window-value">{reviewWin.text}</span>
+                              <span className="dash__window-label">{reviewWin.sub}</span>
+                            </div>
+                            {!reviewClosed && (
+                              <Link to={`/read/${book.arweaveHash}`} className="dash__inspect-btn">📖 Inspect book</Link>
+                            )}
+                          </div>
                         </div>
                         <div className="dash__challenge-reason">
                           <strong>Challenge reason</strong>
@@ -630,7 +643,15 @@ export default function LibrarianDashboard() {
                               <span>{book.review.votes.uphold} uphold · {book.review.votes.dismiss} dismiss</span>
                             </div>
                           ) : (
-                            <span>Votes remain blind until all three reviews are in.</span>
+                            <span>Votes remain blind until all three reviews are in or the 14 days are up.</span>
+                          )}
+                          {decidedEarly && (
+                            <span>
+                              The review period ended with {book.review.submitted} of {book.review.required} reviews, so the votes cast decide
+                              {book.review.submitted === 0 || book.review.votes.uphold === book.review.votes.dismiss
+                                ? ' — with no majority, the challenge is dismissed.'
+                                : '.'}
+                            </span>
                           )}
                         </div>
 
@@ -645,10 +666,18 @@ export default function LibrarianDashboard() {
                           </div>
                         )}
 
+                        {/* Before the reveal the backend says only THAT this wallet
+                            voted, never how — anyone can ask about any wallet. */}
                         {ownVote ? (
-                          <p className="dash__review-locked">Your signed vote ({ownVote.vote}) is recorded and immutable.</p>
+                          <p className="dash__review-locked">
+                            {ownVote.vote
+                              ? `Your signed vote (${ownVote.vote}) is recorded and immutable.`
+                              : 'Your signed vote is recorded and immutable. How everyone voted is shown once all three reviews are in or the 14 days are up.'}
+                          </p>
                         ) : book.review.submitted >= book.review.required ? (
                           <p className="dash__review-locked">Review complete.</p>
+                        ) : reviewClosed ? (
+                          <p className="dash__review-locked">The 14-day review period has ended. No more reviews are accepted.</p>
                         ) : isConflicted ? (
                           <p className="dash__review-locked">The challenger and the uploader/staker cannot review this case.</p>
                         ) : !isLibrarian ? (

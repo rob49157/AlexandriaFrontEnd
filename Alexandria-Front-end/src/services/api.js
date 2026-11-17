@@ -198,6 +198,17 @@ export async function getStakeStatus(arweaveHash) {
 }
 
 /**
+ * Every upload this wallet made, newest first, each with its on-chain `stake`
+ * (window end, challenge and review deadline) and `canPublish`: true once the
+ * 14-day window closed with no challenge, when stake.unstake() approves the
+ * book and returns the stake. `unavailable` counts uploads whose chain read failed.
+ * @param {string} address
+ */
+export async function getArchivistUploads(address) {
+  return fetchJson(`/stake/archivist/${encodeURIComponent(address)}`);
+}
+
+/**
  * Fetch the librarian review queue — books that are registered, actively staked,
  * unchallenged and still inside the 14-day challenge window.
  *
@@ -216,8 +227,12 @@ export async function getReviewQueue({ librarian = '', limit = 50 } = {}) {
 }
 
 /**
- * Fetch challenged books awaiting three independent librarian reviews.
- * Vote directions remain hidden until all three reviews are submitted.
+ * Fetch challenged books awaiting three independent librarian reviews. Each
+ * has 14 days of review from the challenge (`reviewEndsAt`; `review.closed`
+ * once over, when the votes cast decide). Vote directions remain hidden until
+ * all three reviews are submitted or the review closes — the caller's own too:
+ * before the reveal `review.ownVote` is only `{ submitted: true, reviewedAt }`,
+ * because `librarian` is not authenticated.
  * @param {string} librarian
  */
 export async function getChallengeReviews(librarian = '') {

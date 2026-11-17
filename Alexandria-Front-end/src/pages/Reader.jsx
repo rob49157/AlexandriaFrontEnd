@@ -315,9 +315,10 @@ export default function Reader() {
   }, [])
 
   // ── Rental expiry redirect ──
-  // A review copy has no rental to expire. Its limit is the challenge window,
-  // which the Lit Action enforces on the next unlock — kicking the librarian out
-  // on a rental clock they never started would just be wrong.
+  // A review copy has no rental to expire. Its limit is the challenge window, or
+  // for a challenged book 14 days from the challenge, which the Lit Action
+  // enforces on the next unlock — kicking the librarian out on a rental clock
+  // they never started would just be wrong.
   useEffect(() => {
     if (accessMode === 'librarian_review') return undefined
     const id = setInterval(() => {
