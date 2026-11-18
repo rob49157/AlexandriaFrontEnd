@@ -73,6 +73,20 @@ export async function getBookRentalInfo(arweaveHash) {
 }
 
 /**
+ * Every rental this wallet made, newest first, from the BookRented events the
+ * backend indexes. `active` means the rental's expiry is still ahead; opening
+ * the book re-checks access, so this list never grants anything. A rental can
+ * take a few seconds to appear while the backend's event listener catches up.
+ * @param {string} address
+ * @returns {Promise<{ address: string, activeCount: number, total: number, unresolved: number,
+ *   rentals: { arweaveHash: string, book: object|null, rentedAt: string, expiry: string,
+ *     durationDays: number, active: boolean, transactionHash: string }[] }>}
+ */
+export async function getRenterRentals(address) {
+  return fetchJson(`/rental/renter/${encodeURIComponent(address)}`);
+}
+
+/**
  * Fetch decryption payload (sealed envelope, IV, authTag)
  * @param {string} arweaveHash
  * @param {string} address

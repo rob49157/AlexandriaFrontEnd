@@ -28,7 +28,10 @@ async function addWatermarks(pdfBytes, { walletAddress, rentalDate, expiryDate, 
   const isReview = grantedVia === 'librarian_review'
   const footer   = isReview
     ? `LIBRARIAN REVIEW COPY — not for distribution | Librarian: ${walletAddress} | Opened: ${rentalDate}`
-    : `Licensed to: ${walletAddress} | Rental: ${rentalDate} | Expires: ${expiryDate}`
+    : grantedVia === 'uploader'
+      // The archivist's own book: access that never expires, so no expiry to print.
+      ? `ARCHIVIST COPY | Uploader: ${walletAddress} | Opened: ${rentalDate}`
+      : `Licensed to: ${walletAddress} | Rental: ${rentalDate} | Expires: ${expiryDate || 'unknown'}`
 
   for (const page of doc.getPages()) {
     const { width, height } = page.getSize()
@@ -58,6 +61,13 @@ const STEPS = [
   { key: 'watermarking', label: 'Applying reader watermark'                    },
 ]
 
+// Where "← Back" goes, by the door the Lit Action opened for this reader.
+const BACK_PATHS = {
+  rental:           '/dashboard/reader',
+  uploader:         '/dashboard/archivist',
+  librarian_review: '/dashboard/librarian',
+}
+
 // ── Countdown ─────────────────────────────────────────────────────
 function Countdown({ expiryMs }) {
   const [rem, setRem] = useState(() => Math.max(0, expiryMs - Date.now()))
@@ -81,13 +91,12 @@ export default function Reader() {
   const [showWalletSelect, setShowWalletSelect] = useState(false)
 
   const [bookTitle,    setBookTitle]    = useState('')
-  // Read once. Recomputing Date.now() on every render made this a new value each
-  // time, which re-ran the whole unlock pipeline (and its signature prompt) on
-  // every state change.
-  const [rentalExpiry] = useState(() => {
-    const storedExpiry = sessionStorage.getItem(`rental_expiry_${arweaveHash}`)
-    return storedExpiry ? parseInt(storedExpiry, 10) : Date.now() + 7 * 86_400_000
-  })
+  // When the rental ends (ms), as Rent.sol stores it, from decrypt-params. Null
+  // until that answers, and for every door but a rental: an uploader's access
+  // never ends, and a review copy's limit is enforced by the Lit Action. Not a
+  // dependency of the pipeline below, which sets it: that would re-run the whole
+  // unlock (and its signature prompt) the moment it arrived.
+  const [rentalExpiry, setRentalExpiry] = useState(null)
 
   // Flow state
   const [loadPhase,    setLoadPhase]    = useState('idle')  // idle|fetching|params|signing|lit|decrypting|watermarking|ready|error
@@ -109,6 +118,9 @@ export default function Reader() {
   const containerRef   = useRef(null)
   const renderTaskRef  = useRef(null)
   const pdfBytesRef    = useRef(null)
+  // pdf.js moves the watermarked bytes into its worker, so the plaintext lives
+  // there, not in pdfBytesRef. Destroying the loading task is what frees it.
+  const loadingTaskRef = useRef(null)
 
   // ── Loading pipeline ──
   useEffect(() => {
@@ -125,7 +137,6 @@ export default function Reader() {
       }
       const walletAddr = address
       const today      = new Date().toISOString().slice(0, 10)
-      const expDate    = new Date(rentalExpiry).toISOString().slice(0, 10)
 
       // Fetch book title for UI
       getUpload(arweaveHash)
@@ -220,12 +231,17 @@ export default function Reader() {
       if (cancelled) return
       setDoneSteps(s => [...s, 'decrypting'])
 
-      // Step 5: Apply dynamic watermarks
+      // Step 5: Apply dynamic watermarks. A rental ends when Rent.sol says it
+      // does, as decrypt-params read it from the chain just now (any browser,
+      // any session). Other doors carry no rental, so no expiry.
+      const parsedExpiry = grantedVia === 'rental' ? Date.parse(decryptParams.expiry ?? '') : NaN
+      const expiryMs     = Number.isFinite(parsedExpiry) ? parsedExpiry : null
+      setRentalExpiry(expiryMs)
       setLoadPhase('watermarking')
       const watermarked = await addWatermarks(decryptedPdfBytes, {
         walletAddress: walletAddr,
         rentalDate: today,
-        expiryDate: expDate,
+        expiryDate: expiryMs ? new Date(expiryMs).toISOString().slice(0, 10) : null,
         grantedVia,
       })
       if (cancelled) return
@@ -233,8 +249,10 @@ export default function Reader() {
       pdfBytesRef.current = watermarked
       setDoneSteps(s => [...s, 'watermarking'])
 
-      // Step 6: Render in PDF.js
+      // Step 6: Render in PDF.js. This transfers `watermarked` to the worker:
+      // from here its buffer is detached and empty on this side.
       const task = pdfjsLib.getDocument({ data: watermarked })
+      loadingTaskRef.current = task
       const doc  = await task.promise
       if (cancelled) return
 
@@ -256,8 +274,13 @@ export default function Reader() {
         zeroMemory(pdfBytesRef.current)
         pdfBytesRef.current = null
       }
+      // Frees the decrypted PDF held by the pdf.js worker, and the worker itself.
+      if (loadingTaskRef.current) {
+        loadingTaskRef.current.destroy().catch(() => {})
+        loadingTaskRef.current = null
+      }
     }
-  }, [arweaveHash, address, signer, rentalExpiry, restoring])
+  }, [arweaveHash, address, signer, restoring])
 
   // ── Render page on canvas ──
   useEffect(() => {
@@ -315,21 +338,25 @@ export default function Reader() {
   }, [])
 
   // ── Rental expiry redirect ──
-  // A review copy has no rental to expire. Its limit is the challenge window, or
-  // for a challenged book 14 days from the challenge, which the Lit Action
-  // enforces on the next unlock — kicking the librarian out on a rental clock
-  // they never started would just be wrong.
+  // Only a rental has a clock (rentalExpiry is null otherwise). A review copy's
+  // limit is the challenge window, or for a challenged book 14 days from the
+  // challenge, which the Lit Action enforces on the next unlock — kicking the
+  // librarian out on a rental clock they never started would just be wrong. An
+  // uploader's access never ends.
   useEffect(() => {
-    if (accessMode === 'librarian_review') return undefined
+    if (!rentalExpiry) return undefined
     const id = setInterval(() => {
       if (Date.now() > rentalExpiry) navigate(`/book/${arweaveHash}`)
     }, 15_000)
     return () => clearInterval(id)
-  }, [accessMode, rentalExpiry, arweaveHash, navigate])
+  }, [rentalExpiry, arweaveHash, navigate])
 
   const zoomIn  = useCallback(() => setScale(s => Math.min(+(s + 0.25).toFixed(2), 2.5)), [])
   const zoomOut = useCallback(() => setScale(s => Math.max(+(s - 0.25).toFixed(2), 0.5)), [])
-  const goBack  = useCallback(() => navigate(`/book/${arweaveHash}`), [arweaveHash, navigate])
+  const backToBook = useCallback(() => navigate(`/book/${arweaveHash}`), [arweaveHash, navigate])
+  // Back to the dashboard tab that lists this book for this reader: renters see
+  // their rentals, archivists their uploads, librarians their review queue.
+  const goBack = useCallback(() => navigate(BACK_PATHS[accessMode] || BACK_PATHS.rental), [accessMode, navigate])
 
   // ── Render ──
   if (loadPhase !== 'ready' && loadPhase !== 'error') {
@@ -374,7 +401,7 @@ export default function Reader() {
               Connect Wallet
             </button>
           )}
-          <button onClick={goBack} style={btnStyle}>
+          <button onClick={backToBook} style={btnStyle}>
             ← Back to Book
           </button>
           {showWalletSelect && <WalletSelectModal onClose={() => setShowWalletSelect(false)} />}
@@ -395,12 +422,17 @@ export default function Reader() {
               <span className="reader__expiry-label">Librarian review copy</span>
               <span className="reader__expiry-timer">every page is watermarked</span>
             </>
-          ) : (
+          ) : rentalExpiry ? (
             <>
               <span className="reader__expiry-label">Expires in</span>
               <span className="reader__expiry-timer"><Countdown expiryMs={rentalExpiry} /></span>
             </>
-          )}
+          ) : accessMode === 'uploader' ? (
+            <>
+              <span className="reader__expiry-label">Your upload</span>
+              <span className="reader__expiry-timer">permanent access</span>
+            </>
+          ) : null}
         </div>
       </header>
 

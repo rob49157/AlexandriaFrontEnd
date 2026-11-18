@@ -132,6 +132,7 @@ export default function ArchivistDashboard() {
     <main className="dash">
       <div className="dash__inner">
         <div className="dash__tabs">
+          <Link to="/dashboard/reader" className="dash__tab">Reader</Link>
           <Link to="/dashboard/archivist" className="dash__tab dash__tab--active">Archivist</Link>
           <Link to="/dashboard/librarian" className="dash__tab">Librarian</Link>
         </div>
