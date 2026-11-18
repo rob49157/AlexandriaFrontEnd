@@ -7,6 +7,7 @@ import Upload from './pages/Upload'
 import Reader from './pages/Reader'
 import ArchivistDashboard from './pages/ArchivistDashboard'
 import LibrarianDashboard from './pages/LibrarianDashboard'
+import ReaderDashboard from './pages/ReaderDashboard'
 
 function AppContent() {
   const { pathname } = useLocation()
@@ -19,6 +20,7 @@ function AppContent() {
         <Route path="/book/:arweaveHash" element={<BookDetail />} />
         <Route path="/upload" element={<Upload />} />
         <Route path="/read/:arweaveHash" element={<Reader />} />
+        <Route path="/dashboard/reader" element={<ReaderDashboard />} />
         <Route path="/dashboard/archivist" element={<ArchivistDashboard />} />
         <Route path="/dashboard/librarian" element={<LibrarianDashboard />} />
       </Routes>

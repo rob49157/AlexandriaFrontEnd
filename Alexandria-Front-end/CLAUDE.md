@@ -22,6 +22,7 @@ This app handles:
 - **Search & Browse:** Query the backend API, display paginated results with category filtering
 - **Rental Flow:** Call smart contracts directly to rent books with $ALEX
 - **PDF Decryption & Display:** Fetch encrypted PDFs from Arweave/Irys, retrieve symmetric key from Lit Protocol TEE, decrypt in-browser memory via WebCrypto, watermark, and display
+- **Reader Dashboard:** Books rented now (time left, Read →) and rental history
 - **Archivist Dashboard:** View own uploads, stake status, countdown to release, rental revenue
 - **Librarian Dashboard:** Review flagged uploads, challenge suspicious content on-chain, claim rewards
 
@@ -54,6 +55,14 @@ This app handles:
 6. Frontend calls stake.stake(arweaveHash, 100 ALEX) — archivist signs
 7. Backend event listener picks up on-chain Staked event → updates status
 8. Display confirmation with arweaveHash and stake status
+
+=== 14-DAY CHALLENGE WINDOW (starts at the stake, stake.sol CHALLENGE_PERIOD) ===
+9. Librarians may read the book (Lit Action review door) and challenge it
+10. No challenge by the end → Archivist dashboard shows "Publish & reclaim stake"
+    (GET /api/stake/archivist/:address → canPublish) → stake.unstake(arweaveHash),
+    archivist signs → book Approved (rentable), stake returned, upload reward paid.
+    Nothing approves it automatically: only the staker can call unstake()
+11. Challenged → see Challenge Flow
 ```
 
 ### Rental Flow (Reader)
@@ -64,6 +73,10 @@ This app handles:
 4. Frontend calls token.approve(rentContractAddress, totalPrice) — reader signs
 5. Frontend calls rent.rentBook(arweaveHash, durationSeconds) — reader signs
 6. Rent.sol records active rental on-chain
+7. Dashboard → Reader tab (/dashboard/reader, src/pages/ReaderDashboard.jsx) lists
+   the wallet's rentals, current and past: GET /api/rental/renter/:address, read
+   from the BookRented events the backend indexes (a new rental shows up once the
+   listener catches up). Informational: opening a book re-checks access
 ```
 
 ### PDF Decryption & Display Flow (Reader — after rental)
@@ -87,20 +100,40 @@ This app handles:
      WRAPPED to the session public key — never in the clear
    → browser unwrapKey()s it straight into a non-extractable AES-GCM CryptoKey
 4. Frontend decrypts PDF in browser memory using WebCrypto subtle.decrypt (AES-256-GCM)
-5. Frontend watermarks every page (wallet address, rental date, expiry date)
+5. Frontend watermarks every page (wallet address, rental date, expiry date). The
+   expiry, and the Reader's countdown and expiry redirect, come from decrypt-params
+   `expiry` (Rent.sol's stored value, read on every open, so right in any browser);
+   only the rental door has one: uploader access never ends ("ARCHIVIST COPY"),
+   and a review copy's limit is enforced by the Lit Action
 6. Frontend displays watermarked PDF in viewer
 7. Frontend clears decrypted content from memory on component unmount, tab close, or rental expiry
+   → pdfjsLib.getDocument({ data }) TRANSFERS the bytes to the pdf.js worker (the
+     page's copy is detached, byteLength 0), so unmount destroys the loading task;
+     zeroMemory() skips detached buffers (fill() on one throws, which blanked the app)
    → Decrypted PDF is NEVER saved to localStorage, IndexedDB, or disk
+8. "← Back" goes to the dashboard tab for the door used: rental → Reader,
+   uploader → Archivist, librarian_review → Librarian
 ```
 
 ### Challenge Flow (Librarian)
 ```
 1. Librarian views pending/flagged uploads on dashboard
-2. Librarian reviews content and decides to challenge
+2. Librarian reviews content and decides to challenge (inside the 14-day window)
 3. Frontend calls stake.challengeUpload(arweaveHash, reason) — librarian signs
 4. Upload status changes to "challenged" on-chain
-5. Admin/DAO resolves challenge → stake released or slashed
-6. Librarian claims rewards: stake.claimLibrarianRewards() — librarian signs
+5. Review: 14 MORE days counted from the challenge. Active librarians (not the
+   challenger, uploader or staker) may open the book (Lit Action review door) and
+   each submit one wallet-signed vote, uphold or dismiss
+   (POST /api/librarian/challenges/:hash/reviews, stored off-chain). Votes stay
+   blind until 3 are in or the 14 days end; then reading and voting close
+6. Recommendation: 2 of 3, or after the deadline the majority of votes cast
+   (tie or no votes → dismiss). Advisory: the contract does not read it
+7. Contract owner resolves on-chain from the dashboard:
+   stake.resolveChallenge(hash, approved = consensus === 'dismiss', false)
+   → dismissed: book Approved, stake returned, challenger loses 50% of its stake
+   → upheld: archivist's stake slashed (70% challenger, 30% burned), book Rejected
+8. Librarian claims rewards: stake.claimLibrarianRewards() — librarian signs
+   (dashboard button is still a placeholder)
 ```
 
 ## Environment & Tooling
@@ -198,6 +231,7 @@ Alexandria-Front-end/
 │   │   ├── BookDetail.jsx          # Single book view, rent button
 │   │   ├── Upload.jsx              # Archivist upload form
 │   │   ├── Reader.jsx              # PDF viewer (decryption + watermark + display)
+│   │   ├── ReaderDashboard.jsx     # Reader's current rentals and rental history
 │   │   ├── ArchivistDashboard.jsx  # Archivist's uploads, stakes, revenue
 │   │   └── LibrarianDashboard.jsx  # Flagged uploads, challenge UI, rewards
 │   │

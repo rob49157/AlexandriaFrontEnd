@@ -75,11 +75,16 @@ export async function decryptPdfInBrowser(encryptedBytes, cryptoKey, base64Iv, b
 }
 
 /**
- * Safely zero out sensitive byte buffers in memory
+ * Safely zero out sensitive byte buffers in memory.
+ *
+ * Skips a view whose buffer is detached (byteLength 0): pdfjsLib.getDocument()
+ * transfers the bytes it is given to its worker, and fill() on a detached buffer
+ * throws. That throw, inside the Reader's unmount cleanup, used to blank the
+ * whole app. Bytes pdf.js took are freed by destroying its loading task.
  * @param {Uint8Array} uint8Array
  */
 export function zeroMemory(uint8Array) {
-  if (uint8Array && typeof uint8Array.fill === 'function') {
+  if (uint8Array && typeof uint8Array.fill === 'function' && uint8Array.byteLength > 0) {
     uint8Array.fill(0);
   }
 }

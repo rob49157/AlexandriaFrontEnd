@@ -31,10 +31,17 @@
 //    without the stake anyone could upload a PDF, never stake, and read on
 //    Alexandria's credit. stake() records the staker, and the record outlives
 //    unstake() and slashing, so an approved book stays readable by its archivist.
-// 9. Librarian review carve-out: a book is not rentable during its challenge
-//    window, yet a librarian must read it to judge it. An ACTIVE librarian may open
-//    a book that is still challengeable — the same facts
-//    AlexandriaStake.challengeUpload() requires. Access ends when the window does.
+// 9. Librarian review carve-out: a book is not rentable until it is Approved, yet
+//    a librarian must read it to judge it. An ACTIVE librarian may open a book with
+//    an active stake that is either
+//    (a) Pending and still challengeable — the same facts
+//        AlexandriaStake.challengeUpload() requires; access ends with the window, or
+//    (b) Challenged, with a challenge on record that is not resolved yet and
+//        less than CHALLENGE_PERIOD (14 days) old — the three independent
+//        reviewers must read what they vote on. The clock starts at the
+//        challenge, not the stake, so a challenge raised late in the window
+//        still gets a full review. Access ends at that deadline, or earlier if
+//        resolveChallenge() runs; the backend closes voting at the same time.
 //
 // ─── Editing this file ──────────────────────────────────────────────────────
 // Any edit changes the IPFS CID, and the old CID is what the PKP permits. So:
@@ -62,8 +69,11 @@ export const UNLOCK_ALLOWED_DOMAINS = ['localhost:5173'];
 export const MAX_UNLOCK_WINDOW_SECONDS = 600;
 export const MAX_CLOCK_SKEW_SECONDS = 60;
 
-// AlexandriaLibrary.UploadStatus — a book is only reviewable while Pending.
+// AlexandriaLibrary.UploadStatus { Pending, Challenged, Approved, Rejected }. A book
+// is reviewable only while Pending (in its window) or Challenged (unresolved,
+// within 14 days of the challenge).
 export const UPLOAD_STATUS_PENDING = 0;
+export const UPLOAD_STATUS_CHALLENGED = 1;
 
 // String.raw keeps the regex backslashes intact in the shipped source.
 export const LIT_DECRYPT_ACTION_CODE = String.raw`
@@ -149,6 +159,7 @@ async function readAccess(provider, arweaveHash, user, now) {
     [
       'function librarians(address) view returns (uint256,uint256,bool)',
       'function stakes(string) view returns (address,uint256,uint256,bool)',
+      'function challenges(string) view returns (address,uint256,bool,string)',
       'function CHALLENGE_PERIOD() view returns (uint256)'
     ],
     provider
@@ -174,9 +185,14 @@ async function readAccess(provider, arweaveHash, user, now) {
     view.owner = false;
   }
 
-  // Librarian review — only consulted when the cheaper checks fail. Mirrors
-  // AlexandriaStake.challengeUpload(): an active librarian, an active stake, the
-  // book still Pending, and the 14-day window still open on the chain's clock.
+  // Librarian review — only consulted when the cheaper checks fail. An active
+  // librarian and an active stake, then one of two states:
+  //   Pending    — mirrors AlexandriaStake.challengeUpload(): the 14-day window
+  //                is still open on the chain's clock.
+  //   Challenged — a challenge is on record, not resolved yet, and its own
+  //                review period (CHALLENGE_PERIOD counted from the challenge)
+  //                is still open on the chain's clock.
+  // Any other status (Approved, Rejected, unknown) is not review material.
   if (!view.rented && !view.owner) {
     try {
       const librarian = await stake.librarians(user);
@@ -184,13 +200,25 @@ async function readAccess(provider, arweaveHash, user, now) {
       if (librarian[2] === true) {
         const stakeInfo = await stake.stakes(arweaveHash);
         // stakes() → (staker, amount, timestamp, active)
-        const status = await library.getUploadStatus(arweaveHash);
-        const challengePeriod = await stake.CHALLENGE_PERIOD();
-        const windowEnds = stakeInfo[2].add(challengePeriod);
-        view.review =
-          stakeInfo[3] === true &&
-          Number(status) === ${UPLOAD_STATUS_PENDING} &&
-          windowEnds.gt(now);
+        const status = Number(await library.getUploadStatus(arweaveHash));
+        if (stakeInfo[3] === true && status === ${UPLOAD_STATUS_PENDING}) {
+          const challengePeriod = await stake.CHALLENGE_PERIOD();
+          const windowEnds = stakeInfo[2].add(challengePeriod);
+          view.review = windowEnds.gt(now);
+        } else if (stakeInfo[3] === true && status === ${UPLOAD_STATUS_CHALLENGED}) {
+          // challenges() → (challenger, timestamp, resolved, reason). A status of
+          // Challenged with no challenge on record is not a state the contract
+          // produces, so it is refused rather than interpreted.
+          const challenge = await stake.challenges(arweaveHash);
+          const challengePeriod = await stake.CHALLENGE_PERIOD();
+          const reviewEnds = challenge[1].add(challengePeriod);
+          view.review =
+            typeof challenge[0] === 'string' &&
+            /^0x[0-9a-fA-F]{40}$/.test(challenge[0]) &&
+            !/^0x0{40}$/.test(challenge[0]) &&
+            challenge[2] === false &&
+            reviewEnds.gt(now);
+        }
       }
     } catch (err) {
       view.review = false;

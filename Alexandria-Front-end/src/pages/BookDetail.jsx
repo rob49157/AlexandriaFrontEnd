@@ -142,7 +142,6 @@ export default function BookDetail() {
 
       const expiry = Date.now() + selectedDuration.seconds * 1000
       setRentalExpiry(expiry)
-      sessionStorage.setItem(`rental_expiry_${arweaveHash}`, String(expiry))
       setTxState('idle')
     } catch (err) {
       setTxState('error')

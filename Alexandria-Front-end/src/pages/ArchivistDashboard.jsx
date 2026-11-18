@@ -1,9 +1,12 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { useWallet } from '../context/WalletContext'
 import ConnectWalletPrompt from '../components/ConnectWalletPrompt'
-import { searchBooks } from '../services/api'
+import { useContracts } from '../hooks/useContracts'
+import { getArchivistUploads } from '../services/api'
 import { categoryStyle } from '../utils/constants'
+import { reviewDaysLeft } from '../utils/formatters'
+import { isUserRejection } from '../utils/walletErrors'
 import '../styles/Dashboard.css'
 
 const STATUS_CONFIG = {
@@ -13,65 +16,123 @@ const STATUS_CONFIG = {
   storage_failed:       { label: 'Storage Failed',     color: '#e06060', bg: 'rgba(224, 96, 96, 0.12)'  },
   pending_stake: { label: 'Pending Stake', color: '#eab308', bg: 'rgba(234, 179, 8, 0.12)'   },
   pending:       { label: 'Pending Review',color: '#5b8dee', bg: 'rgba(91, 141, 238, 0.12)'  },
+  ready:         { label: 'Ready to Publish', color: '#4caf7a', bg: 'rgba(76, 175, 122, 0.12)' },
   approved:      { label: 'Approved',      color: '#4caf7a', bg: 'rgba(76, 175, 122, 0.12)'  },
   active:        { label: 'Approved',      color: '#4caf7a', bg: 'rgba(76, 175, 122, 0.12)'  },
   challenged:    { label: 'Challenged',    color: '#e06060', bg: 'rgba(224, 96, 96, 0.12)'   },
   rejected:      { label: 'Rejected',      color: '#9090a0', bg: 'rgba(144, 144, 160, 0.12)' },
 }
 
-const DEFAULT_UPLOADS = [
-  {
-    arweaveHash: 'FQ4e7Gt6AB4fSj65bxiyNqrn3Yn2T4nn3dJKKD7ZCx0',
-    title: 'On the Origin of Species',
-    author: 'Charles Darwin',
-    category: 'science',
-    status: 'pending',
-  },
-]
+function daysLeft(endsAt) {
+  const days = reviewDaysLeft(endsAt)
+  return `${days} ${days === 1 ? 'day' : 'days'} left`
+}
+
+/**
+ * Where a book stands in its lifecycle, from the chain rather than the index:
+ * Postgres "pending" covers both a registered book nobody staked yet and a
+ * staked one whose 14-day window is running or over.
+ *
+ *   stake → 14-day challenge window → no challenge: the archivist publishes
+ *                                   → challenged: 14 days of librarian review,
+ *                                     then the owner resolves it on-chain
+ */
+function lifecycle(upload) {
+  const { stake } = upload
+  if (upload.canPublish) {
+    return { status: 'ready', note: 'No challenge in 14 days. Publish to approve it for rental and get your stake back.' }
+  }
+  if (upload.status === 'pending' && stake && !stake.staked) {
+    return { status: 'pending_stake', note: 'Registered. Stake 100 $ALEX to start its 14-day challenge window.', stakeLink: true }
+  }
+  if (upload.status === 'pending_stake') {
+    return { status: 'pending_stake', note: 'Stake 100 $ALEX to start its 14-day challenge window.', stakeLink: true }
+  }
+  if (upload.status === 'pending' && stake?.active && !stake.challenge && !stake.challengePeriodOver) {
+    return { status: 'pending', note: `In its challenge window · ${daysLeft(stake.challengePeriodEnds)}` }
+  }
+  if (upload.status === 'challenged' && stake?.challenge) {
+    const { challenge } = stake
+    if (challenge.resolved) return { status: 'challenged', note: 'Challenge resolved on-chain; updating…' }
+    return {
+      status: 'challenged',
+      note: challenge.reviewOver
+        ? 'Librarian review has ended. Waiting for the owner to resolve it on-chain.'
+        : `Librarians are reviewing the challenge · ${daysLeft(challenge.reviewEndsAt)}`,
+      reason: challenge.reason,
+    }
+  }
+  if (upload.status === 'pending' && !stake) {
+    return { status: 'pending', note: 'Could not read its stake from the chain. Refresh to try again.' }
+  }
+  return { status: upload.status, note: null }
+}
+
+/** The most useful sentence out of a failed transaction (ethers v6 decodes require() strings). */
+function txErrorMessage(err) {
+  if (isUserRejection(err)) return 'Transaction rejected in your wallet.'
+  return err?.reason || err?.shortMessage || err?.message || 'Transaction failed.'
+}
 
 export default function ArchivistDashboard() {
   const { address } = useWallet()
+  const { stakeContract } = useContracts()
+
   const [uploads, setUploads] = useState([])
+  const [unavailable, setUnavailable] = useState(0)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+  // { [arweaveHash]: 'pending' | 'done' | <error message> }
+  const [publishState, setPublishState] = useState({})
 
-  useEffect(() => {
-    let cancelled = false
-    if (!address) {
-      return
+  const load = useCallback(async ({ silent = false } = {}) => {
+    if (!address) return
+    if (!silent) setLoading(true)
+    try {
+      const data = await getArchivistUploads(address)
+      setUploads(Array.isArray(data.uploads) ? data.uploads : [])
+      setUnavailable(data.unavailable ?? 0)
+      setError(null)
+    } catch (err) {
+      // No mock fallback: a made-up book here would look like the archivist's own.
+      setError(err.message || 'Could not reach the backend.')
+    } finally {
+      setLoading(false)
     }
-
-    searchBooks({ status: '', limit: 100 })
-      .then(data => {
-        if (cancelled) return
-        if (data && Array.isArray(data.results)) {
-          const userAddr = address.toLowerCase()
-          const myUploads = data.results.filter(b => b.uploader && b.uploader.toLowerCase() === userAddr)
-          if (myUploads.length > 0) {
-            setUploads(myUploads)
-            setLoading(false)
-            return
-          }
-        }
-        setUploads(DEFAULT_UPLOADS)
-      })
-      .catch(err => {
-        console.warn('Could not fetch archivist uploads from backend:', err)
-        if (!cancelled) setUploads(DEFAULT_UPLOADS)
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-
-    return () => { cancelled = true }
   }, [address])
 
+  useEffect(() => {
+    setUploads([])
+    setPublishState({})
+    load()
+  }, [load])
+
+  // stake.unstake(): the contract re-checks everything — the archivist's own
+  // active stake, the 14-day window over, no challenge — then marks the book
+  // Approved, returns the stake and pays the upload reward.
+  const handlePublish = async (hash) => {
+    if (!stakeContract) return
+    setPublishState(s => ({ ...s, [hash]: 'pending' }))
+    try {
+      const tx = await stakeContract.unstake(hash)
+      await tx.wait()
+      setPublishState(s => ({ ...s, [hash]: 'done' }))
+      load({ silent: true })
+    } catch (err) {
+      console.error('Publish failed', err)
+      setPublishState(s => ({ ...s, [hash]: txErrorMessage(err) }))
+    }
+  }
+
   const displayedUploads = address ? uploads : []
-  const activeStakes = displayedUploads.filter(u => u.status === 'pending' || u.status === 'approved').length
+  const readyCount = displayedUploads.filter(u => u.canPublish && publishState[u.arweaveHash] !== 'done').length
+  const approvedCount = displayedUploads.filter(u => u.status === 'approved').length
 
   return (
     <main className="dash">
       <div className="dash__inner">
         <div className="dash__tabs">
+          <Link to="/dashboard/reader" className="dash__tab">Reader</Link>
           <Link to="/dashboard/archivist" className="dash__tab dash__tab--active">Archivist</Link>
           <Link to="/dashboard/librarian" className="dash__tab">Librarian</Link>
         </div>
@@ -82,9 +143,9 @@ export default function ArchivistDashboard() {
           <>
             <div className="dash__stats">
               {[
-                { label: 'Books Uploaded', value: displayedUploads.length },
-                { label: 'Active Uploads', value: activeStakes   },
-                { label: 'Network Stake',  value: '100 $ALEX / book' },
+                { label: 'Books Uploaded',   value: displayedUploads.length },
+                { label: 'Ready to Publish', value: readyCount },
+                { label: 'Approved',         value: approvedCount },
               ].map(({ label, value }) => (
                 <div key={label} className="dash__stat">
                   <span className="dash__stat-value">{value}</span>
@@ -94,16 +155,34 @@ export default function ArchivistDashboard() {
             </div>
 
             <div>
-              <h2 className="dash__section-title">My Uploads</h2>
-              {loading ? (
-                <p style={{ color: 'var(--text-secondary)' }}>Loading your uploads…</p>
+              <h2 className="dash__section-title">
+                My Uploads
+                <button className="dash__refresh-btn" onClick={() => load()} disabled={loading}>
+                  {loading ? 'Refreshing…' : '↻ Refresh'}
+                </button>
+              </h2>
+              <p className="dash__challenge-reviews-intro">
+                Staking starts a 14-day window in which librarians may challenge the book. If nobody does, publish it here: it is approved for rental and your stake comes back. A challenged book gets 14 more days of librarian review, then the owner resolves it.
+              </p>
+              {error ? (
+                <div className="dash__queue-error">
+                  <span>Could not load your uploads — {error}</span>
+                  <button className="dash__skip-btn" onClick={() => load()}>Retry</button>
+                </div>
+              ) : loading && displayedUploads.length === 0 ? (
+                <div className="dash__empty"><span className="dash__spinner" /> Loading your uploads…</div>
               ) : displayedUploads.length === 0 ? (
-                <p style={{ color: 'var(--text-secondary)' }}>No uploads found. Upload a book to preserve it on Alexandria!</p>
+                <div className="dash__empty">No uploads yet. <Link to="/upload">Upload a book</Link> to preserve it on Alexandria.</div>
               ) : (
                 <div className="dash__list">
                   {displayedUploads.map(upload => {
                     const cs = categoryStyle(upload.category?.toLowerCase())
-                    const ss = STATUS_CONFIG[upload.status] || { label: upload.status || 'Pending', color: '#5b8dee', bg: 'rgba(91,141,238,0.12)' }
+                    const stage = lifecycle(upload)
+                    const published = publishState[upload.arweaveHash] === 'done'
+                    const publishing = publishState[upload.arweaveHash] === 'pending'
+                    const publishError = !published && !publishing ? publishState[upload.arweaveHash] : null
+                    const shownStatus = published ? 'approved' : stage.status
+                    const ss = STATUS_CONFIG[shownStatus] || { label: shownStatus || 'Pending', color: '#5b8dee', bg: 'rgba(91,141,238,0.12)' }
                     const initials = upload.title.split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase()
 
                     return (
@@ -125,12 +204,34 @@ export default function ArchivistDashboard() {
                               {upload.category?.charAt(0).toUpperCase() + upload.category?.slice(1)}
                             </span>
                           </p>
+                          {published ? (
+                            <p className="dash__stage">Published: approved for rental, and your stake is on its way back.</p>
+                          ) : stage.note && (
+                            <p className="dash__stage">{stage.note}</p>
+                          )}
+                          {stage.reason && !published && (
+                            <p className="dash__stage">Challenge reason: “{stage.reason}”</p>
+                          )}
+                          {publishError && <p className="dash__challenge-error">{publishError}</p>}
                         </div>
 
                         <div className="dash__upload-right">
                           <span className="dash__status" style={{ color: ss.color, background: ss.bg }}>
                             {ss.label}
                           </span>
+
+                          {upload.canPublish && !published && (
+                            <button
+                              className="dash__challenge-submit"
+                              onClick={() => handlePublish(upload.arweaveHash)}
+                              disabled={publishing || !stakeContract}
+                            >
+                              {publishing ? 'Confirm in wallet…' : 'Publish & reclaim stake'}
+                            </button>
+                          )}
+                          {stage.stakeLink && (
+                            <Link to="/upload" className="dash__view-link">Stake now →</Link>
+                          )}
 
                           <code className="upload__result-hash" style={{ fontSize: '0.75rem' }}>
                             {upload.arweaveHash?.slice(0, 8)}…{upload.arweaveHash?.slice(-6)}
@@ -144,6 +245,12 @@ export default function ArchivistDashboard() {
                     )
                   })}
                 </div>
+              )}
+
+              {unavailable > 0 && !error && (
+                <p className="dash__queue-note">
+                  {unavailable} upload{unavailable === 1 ? '' : 's'} could not be checked against the chain. Refresh to try again.
+                </p>
               )}
             </div>
           </>

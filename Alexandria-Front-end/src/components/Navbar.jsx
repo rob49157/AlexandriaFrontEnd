@@ -5,7 +5,9 @@ import '../styles/Navbar.css'
 const NAV_LINKS = [
   { to: '/search', label: 'Browse' },
   { to: '/upload', label: 'Upload' },
-  { to: '/dashboard/archivist', label: 'Dashboard' },
+  // Every user is a reader, so the dashboard opens on the Reader tab. `match`
+  // keeps the link lit on any tab, not just the one it opens.
+  { to: '/dashboard/reader', label: 'Dashboard', match: '/dashboard' },
 ]
 
 export default function Navbar() {
@@ -24,11 +26,11 @@ export default function Navbar() {
         </Link>
 
         <nav className="navbar__links">
-          {NAV_LINKS.map(({ to, label }) => (
+          {NAV_LINKS.map(({ to, label, match }) => (
             <Link
               key={to}
               to={to}
-              className={`navbar__link${pathname.startsWith(to) ? ' navbar__link--active' : ''}`}
+              className={`navbar__link${pathname.startsWith(match || to) ? ' navbar__link--active' : ''}`}
             >
               {label}
             </Link>

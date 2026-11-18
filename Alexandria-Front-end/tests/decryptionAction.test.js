@@ -21,6 +21,9 @@
 //   46–49. Two RPC providers: a fact counts only if both report it.
 //   50–52. Invariants over every run: no response ever carries a key in the clear,
 //          and a wrapped key opens only with its own session key.
+//   53–55. The uploader door needs the uploader's own stake.
+//   56–67. Librarian review of a challenged book: open for 14 days from the
+//          challenge while it is unresolved, and every way it must be refused.
 
 import crypto from 'node:crypto';
 import { Wallet, verifyMessage, sha256, toUtf8Bytes, encodeBase64, decodeBase64 } from 'ethers';
@@ -65,18 +68,22 @@ const BOB_ARCHIVIST = Wallet.createRandom();
 const EVE_ATTACKER = Wallet.createRandom();
 const STRANGER = Wallet.createRandom();
 const LIBRARIAN = Wallet.createRandom();
+const CHALLENGER = Wallet.createRandom();
 
 const HASH_CHEAP = 'hash_CHEAP_PAMPHLET_0000000000000000000000';
 const HASH_RARE = 'hash_RARE_MANUSCRIPT_000000000000000000000';
 const HASH_REVIEW = 'hash_UNDER_REVIEW_00000000000000000000000';
 const HASH_UNSTAKED = 'hash_NEVER_STAKED_00000000000000000000000';
+const HASH_CHALLENGED = 'hash_CHALLENGED_BOOK_000000000000000000000';
 
 const DAY = 86_400;
 const CHALLENGE_PERIOD = 14 * DAY;
 const NOW = 1_800_000_000;
 
 const STATUS_PENDING = 0;
+const STATUS_CHALLENGED = 1;
 const STATUS_APPROVED = 2;
+const STATUS_REJECTED = 3;
 
 const DOMAIN = UNLOCK_ALLOWED_DOMAINS[0];
 const [RPC_A, RPC_B] = BASE_SEPOLIA_RPC_URLS;
@@ -108,6 +115,8 @@ const envelopeRare = seal({ v: 1, k: KEY_RARE, arweaveHash: HASH_RARE });
 const envelopeReview = seal({ v: 1, k: KEY_REVIEW, arweaveHash: HASH_REVIEW });
 const KEY_UNSTAKED = crypto.randomBytes(32).toString('base64');
 const envelopeUnstaked = seal({ v: 1, k: KEY_UNSTAKED, arweaveHash: HASH_UNSTAKED });
+const KEY_CHALLENGED = crypto.randomBytes(32).toString('base64');
+const envelopeChallenged = seal({ v: 1, k: KEY_CHALLENGED, arweaveHash: HASH_CHALLENGED });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sandbox — what the Action sees in place of Lit, ethers and the chain
@@ -133,6 +142,7 @@ function defaultChain() {
     rentPaused: false,
     rentDown: false,
     stakeReverts: false,
+    challengesRevert: false,
     rentals: {
       [HASH_CHEAP]: [lower(ALICE_RENTER), lower(EVE_ATTACKER)],
       [HASH_RARE]: [lower(ALICE_RENTER)],
@@ -142,12 +152,14 @@ function defaultChain() {
       [HASH_RARE]: BOB_ARCHIVIST.address,
       [HASH_REVIEW]: BOB_ARCHIVIST.address,
       [HASH_UNSTAKED]: BOB_ARCHIVIST.address,
+      [HASH_CHALLENGED]: BOB_ARCHIVIST.address,
     },
     statuses: {
       [HASH_CHEAP]: STATUS_APPROVED,
       [HASH_RARE]: STATUS_APPROVED,
       [HASH_REVIEW]: STATUS_PENDING,
       [HASH_UNSTAKED]: STATUS_PENDING,
+      [HASH_CHALLENGED]: STATUS_CHALLENGED,
     },
     librarians: {
       [lower(LIBRARIAN)]: { amount: '50', timestamp: NOW - 30 * DAY, active: true },
@@ -159,6 +171,14 @@ function defaultChain() {
       // Approved: staked, window passed, unstaked. unstake() clears only `active`.
       [HASH_RARE]: { staker: BOB_ARCHIVIST.address, amount: '100', timestamp: NOW - 60 * DAY, active: false },
       // HASH_UNSTAKED: registered to Bob, never staked, so no record at all.
+      // Staked twenty days ago, so its 14-day window shut six days ago. It was
+      // challenged inside the window, and the stake stays active until resolved.
+      [HASH_CHALLENGED]: { staker: BOB_ARCHIVIST.address, amount: '100', timestamp: NOW - 20 * DAY, active: true },
+    },
+    // challenges(hash): what challengeUpload() wrote. resolveChallenge() sets `resolved`.
+    // Challenged ten days ago, inside the stake's window: four days of review left.
+    challenges: {
+      [HASH_CHALLENGED]: { challenger: CHALLENGER.address, timestamp: NOW - 10 * DAY, resolved: false, reason: 'Copied from a paywalled textbook' },
     },
   };
 }
@@ -212,6 +232,14 @@ function contractFor(address, chain) {
         return info
           ? [info.staker, bn(info.amount), bn(info.timestamp), info.active]
           : [ZERO_ADDRESS, bn(0), bn(0), false];
+      },
+      // A public mapping of a struct: an unchallenged book reads as all zeroes.
+      challenges: async (hash) => {
+        if (chain.stakeReverts || chain.challengesRevert) throw new Error('execution reverted');
+        const info = at(chain.challenges, hash, null);
+        return info
+          ? [info.challenger, bn(info.timestamp), info.resolved, info.reason]
+          : [ZERO_ADDRESS, bn(0), false, ''];
       },
       CHALLENGE_PERIOD: async () => bn(CHALLENGE_PERIOD),
     };
@@ -694,6 +722,83 @@ async function run() {
     });
     const bobAgain = (await call({ wallet: BOB_ARCHIVIST, ciphertext: envelopeUnstaked }, othersStake)).result;
     assert(bobAgain.error === 'access_denied', "55. someone else's stake does not open the uploader's door");
+  }
+
+  // A challenge moves the book to Challenged, and three independent librarians
+  // then vote on it. They have to read what they vote on. The review gets its own
+  // 14 days counted from the challenge — a challenge raised on day 13 of the
+  // stake's window still gets a full review — and closes earlier if
+  // resolveChallenge() marks it resolved.
+  section('Librarian review of a challenged book');
+  {
+    const reviewChallenged = async (chains, wallet = LIBRARIAN) =>
+      (await call({ wallet, ciphertext: envelopeChallenged }, chains)).result;
+
+    const granted = await reviewChallenged(defaultChains());
+    assert(
+      (await unwrap(granted)) === KEY_CHALLENGED,
+      "56. an active librarian can open an unresolved challenged book within 14 days of the challenge, even past the stake's window"
+    );
+    assert(granted.grantedVia === 'librarian_review', '57. and the grant is a review copy, which is what watermarks the pages');
+
+    // resolveChallenge() also moves the status on, but the gate must not lean
+    // on the status alone: a resolved challenge closes the door by itself.
+    const resolved = bothChains((c) => (c.challenges[HASH_CHALLENGED].resolved = true));
+    assert((await reviewChallenged(resolved)).error === 'access_denied', '58. once the challenge is resolved, review access ends');
+
+    const noRecord = bothChains((c) => delete c.challenges[HASH_CHALLENGED]);
+    assert(
+      (await reviewChallenged(noRecord)).error === 'access_denied',
+      '59. a Challenged status with no challenge on record is refused, not interpreted'
+    );
+
+    const unstakedLibrarian = bothChains((c) => (c.librarians[LIBRARIAN.address.toLowerCase()].active = false));
+    assert((await reviewChallenged(unstakedLibrarian)).error === 'access_denied', '60. a librarian who unstaked is denied');
+
+    const stakeInactive = bothChains((c) => (c.stakes[HASH_CHALLENGED].active = false));
+    assert((await reviewChallenged(stakeInactive)).error === 'access_denied', '61. a book with no active stake is denied');
+
+    assert(
+      (await reviewChallenged(defaultChains(), STRANGER)).error === 'access_denied',
+      '62. a wallet that was never a librarian is denied'
+    );
+
+    const unreadable = bothChains((c) => (c.challengesRevert = true));
+    assert(
+      (await reviewChallenged(unreadable)).error === 'access_denied',
+      '63. an unreadable challenge record denies review, it does not assume it'
+    );
+
+    const rejected = bothChains((c) => (c.statuses[HASH_CHALLENGED] = STATUS_REJECTED));
+    assert(
+      (await reviewChallenged(rejected)).error === 'access_denied',
+      '64. a Rejected book is not review material, even with a challenge record still unresolved'
+    );
+
+    const split = defaultChains();
+    split[RPC_B].challenges[HASH_CHALLENGED].resolved = true;
+    const disagree = await reviewChallenged(split);
+    assert(
+      disagree.error === 'rpc_disagree' && disagree.wrappedKey === undefined,
+      '65. one provider reporting the challenge resolved is enough to refuse'
+    );
+
+    const reviewOver = bothChains((c) => (c.challenges[HASH_CHALLENGED].timestamp = NOW - 15 * DAY));
+    assert(
+      (await reviewChallenged(reviewOver)).error === 'access_denied',
+      '66. 14 days after the challenge, review access ends even if nobody resolved it'
+    );
+
+    // As test 45 for the Pending window: "now" is the newer of the two clocks.
+    const lag = defaultChains();
+    const closesAt = lag[RPC_A].challenges[HASH_CHALLENGED].timestamp + CHALLENGE_PERIOD;
+    lag[RPC_A].now = closesAt + 5;
+    lag[RPC_B].now = closesAt - 20;
+    const late = await call(
+      { wallet: LIBRARIAN, ciphertext: envelopeChallenged, issuedAt: closesAt - 60, expiresAt: closesAt + 200 },
+      lag
+    );
+    assert(late.result.error === 'access_denied', '67. a lagging provider cannot reopen a closed challenge review');
   }
 
   section('Invariants over every run above');

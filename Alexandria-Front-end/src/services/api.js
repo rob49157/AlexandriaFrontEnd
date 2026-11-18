@@ -73,6 +73,20 @@ export async function getBookRentalInfo(arweaveHash) {
 }
 
 /**
+ * Every rental this wallet made, newest first, from the BookRented events the
+ * backend indexes. `active` means the rental's expiry is still ahead; opening
+ * the book re-checks access, so this list never grants anything. A rental can
+ * take a few seconds to appear while the backend's event listener catches up.
+ * @param {string} address
+ * @returns {Promise<{ address: string, activeCount: number, total: number, unresolved: number,
+ *   rentals: { arweaveHash: string, book: object|null, rentedAt: string, expiry: string,
+ *     durationDays: number, active: boolean, transactionHash: string }[] }>}
+ */
+export async function getRenterRentals(address) {
+  return fetchJson(`/rental/renter/${encodeURIComponent(address)}`);
+}
+
+/**
  * Fetch decryption payload (sealed envelope, IV, authTag)
  * @param {string} arweaveHash
  * @param {string} address
@@ -198,6 +212,17 @@ export async function getStakeStatus(arweaveHash) {
 }
 
 /**
+ * Every upload this wallet made, newest first, each with its on-chain `stake`
+ * (window end, challenge and review deadline) and `canPublish`: true once the
+ * 14-day window closed with no challenge, when stake.unstake() approves the
+ * book and returns the stake. `unavailable` counts uploads whose chain read failed.
+ * @param {string} address
+ */
+export async function getArchivistUploads(address) {
+  return fetchJson(`/stake/archivist/${encodeURIComponent(address)}`);
+}
+
+/**
  * Fetch the librarian review queue — books that are registered, actively staked,
  * unchallenged and still inside the 14-day challenge window.
  *
@@ -213,4 +238,32 @@ export async function getReviewQueue({ librarian = '', limit = 50 } = {}) {
   if (limit) query.set('limit', String(limit));
 
   return fetchJson(`/librarian/review-queue?${query.toString()}`);
+}
+
+/**
+ * Fetch challenged books awaiting three independent librarian reviews. Each
+ * has 14 days of review from the challenge (`reviewEndsAt`; `review.closed`
+ * once over, when the votes cast decide). Vote directions remain hidden until
+ * all three reviews are submitted or the review closes — the caller's own too:
+ * before the reveal `review.ownVote` is only `{ submitted: true, reviewedAt }`,
+ * because `librarian` is not authenticated.
+ * @param {string} librarian
+ */
+export async function getChallengeReviews(librarian = '') {
+  const query = new URLSearchParams();
+  if (librarian) query.set('librarian', librarian);
+  return fetchJson(`/librarian/challenges?${query.toString()}`);
+}
+
+/**
+ * Submit one wallet-signed, immutable review for a pending challenge.
+ * @param {string} arweaveHash
+ * @param {{ librarian: string, vote: 'uphold'|'dismiss', rationale: string, timestamp: number, signature: string }} body
+ */
+export async function submitChallengeReview(arweaveHash, body) {
+  return fetchJson(`/librarian/challenges/${encodeURIComponent(arweaveHash)}/reviews`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+  });
 }
