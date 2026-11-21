@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test:lit-action": "node tests/decryptionAction.test.js",
+    "test:price": "node tests/alexAmount.test.js",
     "lit:register": "node --env-file=.env scripts/lit-register-decrypt-action.js"
   },
   "dependencies": {

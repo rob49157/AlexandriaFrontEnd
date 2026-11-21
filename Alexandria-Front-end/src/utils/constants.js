@@ -32,3 +32,15 @@ export function categoryStyle(slug) {
 export function categoryLabel(slug) {
   return findCategory(slug)?.label ?? (slug ? slug.charAt(0).toUpperCase() + slug.slice(1) : 'General')
 }
+
+// The rental lengths Rent.rentBook() accepts (DURATION_1DAY, _7DAY, _30DAY).
+// It charges the archivist's bookPrices[hash] once per day.
+export const RENTAL_DURATIONS = [
+  { days: 1,  seconds: 86400,   label: '1 day'   },
+  { days: 7,  seconds: 604800,  label: '7 days'  },
+  { days: 30, seconds: 2592000, label: '30 days' },
+]
+
+// Rental payments split in payment.sol: ARCHIVIST_SHARE, credited to the
+// archivist and withdrawn with claimArchivistRewards().
+export const ARCHIVIST_SHARE_PERCENT = 70
