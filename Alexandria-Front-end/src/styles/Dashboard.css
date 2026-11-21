@@ -90,6 +90,10 @@
   margin-bottom: 1.75rem;
 }
 
+.dash__stats--four {
+  grid-template-columns: repeat(4, 1fr);
+}
+
 .dash__stat {
   display: flex;
   flex-direction: column;
@@ -237,6 +241,105 @@
   font-size: 0.8rem;
   color: var(--text-secondary);
   margin: 0.35rem 0 0;
+  line-height: 1.4;
+}
+
+/* Something the archivist has to do, in the Pending Stake yellow */
+.dash__stage--attention {
+  color: #eab308;
+}
+
+/* Daily rental price of an approved book (Rent.setBookPrice) */
+.dash__price {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.dash__price-current {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.dash__price-change {
+  margin-left: 0.5rem;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 0.8rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.dash__price-change:hover {
+  color: var(--accent-hover);
+}
+
+.dash__price-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.dash__price-field {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.625rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--transition);
+}
+
+.dash__price-field:focus-within {
+  border-color: var(--border-accent);
+}
+
+.dash__price-input {
+  width: 6.5rem;
+  padding: 0.4rem 0;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+}
+
+.dash__price-unit {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.dash__price-submit {
+  padding: 0.45rem 0.9rem;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: #0a0a12;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.dash__price-submit:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.dash__price-submit:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.dash__price-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
   line-height: 1.4;
 }
 
@@ -561,6 +664,10 @@
 @media (max-width: 900px) {
   .dash__stats {
     grid-template-columns: repeat(3, 1fr);
+  }
+
+  .dash__stats--four {
+    grid-template-columns: repeat(2, 1fr);
   }
 }
 

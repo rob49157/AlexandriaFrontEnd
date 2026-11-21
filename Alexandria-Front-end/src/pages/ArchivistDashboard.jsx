@@ -4,8 +4,8 @@ import { useWallet } from '../context/WalletContext'
 import ConnectWalletPrompt from '../components/ConnectWalletPrompt'
 import { useContracts } from '../hooks/useContracts'
 import { getArchivistUploads } from '../services/api'
-import { categoryStyle } from '../utils/constants'
-import { reviewDaysLeft } from '../utils/formatters'
+import { categoryStyle, RENTAL_DURATIONS, ARCHIVIST_SHARE_PERCENT } from '../utils/constants'
+import { reviewDaysLeft, alexFromWei, parseAlexAmount } from '../utils/formatters'
 import { isUserRejection } from '../utils/walletErrors'
 import '../styles/Dashboard.css'
 
@@ -74,9 +74,133 @@ function txErrorMessage(err) {
   return err?.reason || err?.shortMessage || err?.message || 'Transaction failed.'
 }
 
+/**
+ * The daily rental price of an approved book: Rent.setBookPrice(hash, price),
+ * signed by the archivist. The contract allows it only for the book's uploader,
+ * only once it is Approved, as often as they like. A new price applies to
+ * rentals that start after it; rentals already paid for are untouched.
+ */
+function PriceEditor({ hash, priceWei, delisted, rentContract, isCorrectNetwork, switchToBaseSepolia, onSaved }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [txState, setTxState] = useState('idle') // idle | signing | confirming
+  const [error, setError] = useState(null)
+
+  // rentBook() refuses a delisted book, and nothing lists it again.
+  if (delisted) {
+    return <p className="dash__stage">Delisted by the owner: it can no longer be rented, whatever its price.</p>
+  }
+
+  const current = priceWei ? BigInt(priceWei) : 0n
+  const hasPrice = current > 0n
+  const showForm = editing || !hasPrice
+  const busy = txState !== 'idle'
+  const parsed = parseAlexAmount(draft)
+  const unchanged = parsed !== null && parsed === current
+
+  const save = async (event) => {
+    event.preventDefault()
+    if (!isCorrectNetwork) {
+      switchToBaseSepolia()
+      return
+    }
+    if (!parsed || unchanged || !rentContract) return
+    setError(null)
+    setTxState('signing')
+    try {
+      const tx = await rentContract.setBookPrice(hash, parsed)
+      setTxState('confirming')
+      await tx.wait()
+      onSaved(hash, parsed.toString())
+      setEditing(false)
+      setDraft('')
+    } catch (err) {
+      console.error('Set price failed', err)
+      setError(txErrorMessage(err))
+    } finally {
+      setTxState('idle')
+    }
+  }
+
+  const cancel = () => {
+    setEditing(false)
+    setDraft('')
+    setError(null)
+  }
+
+  const buttonLabel =
+    txState === 'signing' ? 'Confirm in wallet…'
+      : txState === 'confirming' ? 'Saving on-chain…'
+        : !isCorrectNetwork ? 'Switch to Base Sepolia'
+          : hasPrice ? 'Update price' : 'Set price'
+
+  return (
+    <div className="dash__price">
+      {hasPrice ? (
+        <p className="dash__stage">
+          Rental price: <strong className="dash__price-current">{alexFromWei(current)} $ALEX / day</strong>
+          {!showForm && (
+            <button type="button" className="dash__price-change" onClick={() => setEditing(true)}>
+              Change
+            </button>
+          )}
+        </p>
+      ) : (
+        <p className="dash__stage dash__stage--attention">
+          No rental price yet. Readers can't rent it until you set one.
+        </p>
+      )}
+
+      {showForm && (
+        <form className="dash__price-form" onSubmit={save}>
+          <div className="dash__price-field">
+            <input
+              className="dash__price-input"
+              type="text"
+              inputMode="decimal"
+              autoComplete="off"
+              aria-label="Rental price per day, in $ALEX"
+              placeholder={hasPrice ? alexFromWei(current) : 'e.g. 2'}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              disabled={busy}
+            />
+            <span className="dash__price-unit">$ALEX / day</span>
+          </div>
+          <button
+            type="submit"
+            className="dash__price-submit"
+            disabled={busy || (isCorrectNetwork && (!parsed || unchanged || !rentContract))}
+          >
+            {buttonLabel}
+          </button>
+          {editing && !busy && (
+            <button type="button" className="dash__skip-btn" onClick={cancel}>Cancel</button>
+          )}
+        </form>
+      )}
+
+      {showForm && draft.trim() !== '' && (
+        parsed === null ? (
+          <p className="dash__challenge-error">Enter a number above 0, like 2 or 0.5 (a dot for decimals).</p>
+        ) : unchanged ? (
+          <p className="dash__price-hint">That is already the price.</p>
+        ) : (
+          <p className="dash__price-hint">
+            Readers pay {RENTAL_DURATIONS.map(d => `${alexFromWei(parsed * BigInt(d.days))} for ${d.label}`).join(' · ')}.
+            {' '}You receive {ARCHIVIST_SHARE_PERCENT}% of each rental.
+            {hasPrice && ' Rentals already paid for keep their price.'}
+          </p>
+        )
+      )}
+      {error && <p className="dash__challenge-error">{error}</p>}
+    </div>
+  )
+}
+
 export default function ArchivistDashboard() {
-  const { address } = useWallet()
-  const { stakeContract } = useContracts()
+  const { address, isCorrectNetwork, switchToBaseSepolia } = useWallet()
+  const { stakeContract, rentContract } = useContracts()
 
   const [uploads, setUploads] = useState([])
   const [unavailable, setUnavailable] = useState(0)
@@ -84,13 +208,23 @@ export default function ArchivistDashboard() {
   const [error, setError] = useState(null)
   // { [arweaveHash]: 'pending' | 'done' | <error message> }
   const [publishState, setPublishState] = useState({})
+  // { [arweaveHash]: atomic price } set from this page. The list reads prices
+  // from the index, which learns of BookPriceSet only once the listener catches up.
+  const [savedPrices, setSavedPrices] = useState({})
 
   const load = useCallback(async ({ silent = false } = {}) => {
     if (!address) return
     if (!silent) setLoading(true)
     try {
       const data = await getArchivistUploads(address)
-      setUploads(Array.isArray(data.uploads) ? data.uploads : [])
+      const list = Array.isArray(data.uploads) ? data.uploads : []
+      setUploads(list)
+      // Once the index shows a price set here, it is the source again.
+      setSavedPrices(saved => {
+        const next = { ...saved }
+        for (const u of list) if (next[u.arweaveHash] === u.pricePerDay) delete next[u.arweaveHash]
+        return next
+      })
       setUnavailable(data.unavailable ?? 0)
       setError(null)
     } catch (err) {
@@ -104,8 +238,14 @@ export default function ArchivistDashboard() {
   useEffect(() => {
     setUploads([])
     setPublishState({})
+    setSavedPrices({})
     load()
   }, [load])
+
+  const handlePriceSaved = (hash, priceWei) => {
+    setSavedPrices(s => ({ ...s, [hash]: priceWei }))
+    load({ silent: true })
+  }
 
   // stake.unstake(): the contract re-checks everything — the archivist's own
   // active stake, the 14-day window over, no challenge — then marks the book
@@ -126,7 +266,11 @@ export default function ArchivistDashboard() {
 
   const displayedUploads = address ? uploads : []
   const readyCount = displayedUploads.filter(u => u.canPublish && publishState[u.arweaveHash] !== 'done').length
-  const approvedCount = displayedUploads.filter(u => u.status === 'approved').length
+  const isApproved = (u) => u.status === 'approved' || publishState[u.arweaveHash] === 'done'
+  const approvedCount = displayedUploads.filter(isApproved).length
+  const unpricedCount = displayedUploads.filter(
+    u => isApproved(u) && !u.delisted && !savedPrices[u.arweaveHash] && !u.pricePerDay
+  ).length
 
   return (
     <main className="dash">
@@ -141,11 +285,12 @@ export default function ArchivistDashboard() {
           <ConnectWalletPrompt message="Connect your wallet to view your archivist dashboard." />
         ) : (
           <>
-            <div className="dash__stats">
+            <div className="dash__stats dash__stats--four">
               {[
                 { label: 'Books Uploaded',   value: displayedUploads.length },
                 { label: 'Ready to Publish', value: readyCount },
                 { label: 'Approved',         value: approvedCount },
+                { label: 'Need a Price',     value: unpricedCount },
               ].map(({ label, value }) => (
                 <div key={label} className="dash__stat">
                   <span className="dash__stat-value">{value}</span>
@@ -162,7 +307,7 @@ export default function ArchivistDashboard() {
                 </button>
               </h2>
               <p className="dash__challenge-reviews-intro">
-                Staking starts a 14-day window in which librarians may challenge the book. If nobody does, publish it here: it is approved for rental and your stake comes back. A challenged book gets 14 more days of librarian review, then the owner resolves it.
+                Staking starts a 14-day window in which librarians may challenge the book. If nobody does, publish it here: it is approved for rental and your stake comes back. A challenged book gets 14 more days of librarian review, then the owner resolves it. Once a book is approved, set its daily rental price here; readers can rent it as soon as it has one, and you can change it at any time.
               </p>
               {error ? (
                 <div className="dash__queue-error">
@@ -213,6 +358,17 @@ export default function ArchivistDashboard() {
                             <p className="dash__stage">Challenge reason: “{stage.reason}”</p>
                           )}
                           {publishError && <p className="dash__challenge-error">{publishError}</p>}
+                          {isApproved(upload) && (
+                            <PriceEditor
+                              hash={upload.arweaveHash}
+                              priceWei={savedPrices[upload.arweaveHash] ?? upload.pricePerDay}
+                              delisted={upload.delisted}
+                              rentContract={rentContract}
+                              isCorrectNetwork={isCorrectNetwork}
+                              switchToBaseSepolia={switchToBaseSepolia}
+                              onSaved={handlePriceSaved}
+                            />
+                          )}
                         </div>
 
                         <div className="dash__upload-right">

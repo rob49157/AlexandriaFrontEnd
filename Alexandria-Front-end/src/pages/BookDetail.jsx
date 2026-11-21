@@ -1,14 +1,13 @@
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
-import { parseUnits } from 'ethers'
 import { useWallet } from '../context/WalletContext'
 import WalletSelectModal from '../components/WalletSelectModal'
 import { useContracts } from '../hooks/useContracts'
 import { getUpload, getRentalStatus, getBookRentalInfo } from '../services/api'
 import { ADDRESSES } from '../config/contracts'
 import { MOCK_BOOKS } from '../data/mockBooks'
-import { categoryLabel, categoryStyle } from '../utils/constants'
-import { reviewLabel } from '../utils/formatters'
+import { categoryLabel, categoryStyle, RENTAL_DURATIONS } from '../utils/constants'
+import { reviewLabel, alexFromWei } from '../utils/formatters'
 import '../styles/BookDetail.css'
 
 // Why GET /rental/book answered rentable: false. Mirrors the checks in
@@ -26,12 +25,13 @@ function notRentableReason(book, rentalInfo) {
   return "This book can't be rented right now."
 }
 
-// Contract-supported durations in Rent.sol
-const DURATIONS = [
-  { days: 1,  seconds: 86400,   label: '1 day'   },
-  { days: 7,  seconds: 604800,  label: '7 days'  },
-  { days: 30, seconds: 2592000, label: '30 days' },
-]
+// What rentBook() will charge, in atomic $ALEX: the archivist's daily price
+// times the days. Exact, because the approval has to cover it to the last wei.
+// Null while the chain has not given a price.
+function rentalTotalWei(rentalInfo, duration) {
+  if (!rentalInfo?.priceSet) return null
+  return BigInt(rentalInfo.pricePerDay) * BigInt(duration.days)
+}
 
 function Countdown({ expiryMs }) {
   const [rem, setRem] = useState(() => expiryMs - Date.now())
@@ -62,7 +62,7 @@ export default function BookDetail() {
   const [book, setBook] = useState(null)
   const [loading, setLoading] = useState(true)
   const [rentalInfo, setRentalInfo] = useState(null)
-  const [selectedDuration, setSelectedDuration] = useState(DURATIONS[1]) // 7 days default
+  const [selectedDuration, setSelectedDuration] = useState(RENTAL_DURATIONS[1]) // 7 days default
   const [txState, setTxState] = useState('idle') // idle | approving | renting | error
   const [txError, setTxError] = useState(null)
   const [rentalExpiry, setRentalExpiry] = useState(null)
@@ -123,9 +123,12 @@ export default function BookDetail() {
       return
     }
 
-    const pricePerDay = Number(rentalInfo?.pricePerDayAlex || 1)
-    const totalPrice = pricePerDay * selectedDuration.days
-    const totalPriceWei = parseUnits(totalPrice.toString(), 18)
+    const totalPriceWei = rentalTotalWei(rentalInfo, selectedDuration)
+    if (totalPriceWei === null) {
+      setTxState('error')
+      setTxError("This book's price could not be read from the chain. Refresh and try again.")
+      return
+    }
 
     setTxState('approving')
     setTxError(null)
@@ -144,8 +147,20 @@ export default function BookDetail() {
       setRentalExpiry(expiry)
       setTxState('idle')
     } catch (err) {
+      // The archivist can change the price at any time, and rentBook() charges
+      // the price when it runs: a raise after this page loaded leaves the
+      // approval short, and transferFrom reverts. Nothing is taken then.
+      const fresh = await getBookRentalInfo(arweaveHash).catch(() => null)
+      if (fresh) setRentalInfo(fresh)
       setTxState('error')
-      setTxError(err.reason || err.message || 'Rental transaction failed.')
+      if (fresh?.priceSet && fresh.pricePerDay !== rentalInfo.pricePerDay) {
+        setTxError(
+          `The archivist changed the price to ${alexFromWei(fresh.pricePerDay)} $ALEX/day while you were renting. ` +
+          'No $ALEX was taken. Check the new total and try again.'
+        )
+      } else {
+        setTxError(err.reason || err.message || 'Rental transaction failed.')
+      }
     }
   }
 
@@ -174,12 +189,14 @@ export default function BookDetail() {
 
   const style         = categoryStyle(book.category?.toLowerCase())
   const initials      = book.title.split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase()
-  const pricePerDay   = Number(rentalInfo?.pricePerDayAlex || 1)
-  const totalPrice    = pricePerDay * selectedDuration.days
+  const totalWei      = rentalTotalWei(rentalInfo, selectedDuration)
+  const totalPrice    = totalWei === null ? null : alexFromWei(totalWei)
+  const pricePerDay   = rentalInfo?.priceSet ? alexFromWei(rentalInfo.pricePerDay) : null
   const isRented      = isUploader || Boolean(rentalExpiry && rentalExpiry > Date.now())
   const isPending     = txState === 'approving' || txState === 'renting'
-  // Only when the chain answered: without rentalInfo the rent box stays as it was
   const notRentable   = Boolean(rentalInfo && !rentalInfo.rentable)
+  // The backend could not read the chain: no price to show, so no rent button
+  const priceUnknown  = !rentalInfo || totalWei === null
   const inReview      = book.status === 'pending' && Boolean(book.reviewEndsAt)
 
   return (
@@ -254,6 +271,16 @@ export default function BookDetail() {
                   <Link to={`/read/${arweaveHash}`} className="book-detail__read-btn">
                     Read Book →
                   </Link>
+                  {rentalInfo?.onChainStatus === 'approved' && !rentalInfo.delisted && (
+                    <p className="book-detail__wallet-note">
+                      {rentalInfo.priceSet
+                        ? `Readers pay ${pricePerDay} $ALEX per day. `
+                        : "Readers can't rent it until you set a daily price. "}
+                      <Link to="/dashboard/archivist">
+                        {rentalInfo.priceSet ? 'Change it on your dashboard →' : 'Set it on your dashboard →'}
+                      </Link>
+                    </p>
+                  )}
                 </>
               ) : isRented ? (
                 <>
@@ -271,10 +298,14 @@ export default function BookDetail() {
                   {inReview && <span className="book-detail__unavailable-title">{reviewLabel(book.reviewEndsAt)}</span>}
                   <span>{notRentableReason(book, rentalInfo)}</span>
                 </div>
+              ) : priceUnknown ? (
+                <div className="book-detail__unavailable">
+                  <span>This book's rental price could not be read from the chain. Refresh the page to try again.</span>
+                </div>
               ) : (
                 <>
                   <div className="book-detail__durations">
-                    {DURATIONS.map((dur) => (
+                    {RENTAL_DURATIONS.map((dur) => (
                       <button
                         key={dur.days}
                         className={`book-detail__dur${selectedDuration.days === dur.days ? ' book-detail__dur--active' : ''}`}

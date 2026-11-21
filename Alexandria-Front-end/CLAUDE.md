@@ -23,7 +23,7 @@ This app handles:
 - **Rental Flow:** Call smart contracts directly to rent books with $ALEX
 - **PDF Decryption & Display:** Fetch encrypted PDFs from Arweave/Irys, retrieve symmetric key from Lit Protocol TEE, decrypt in-browser memory via WebCrypto, watermark, and display
 - **Reader Dashboard:** Books rented now (time left, Read →) and rental history
-- **Archivist Dashboard:** View own uploads, stake status, countdown to release, rental revenue
+- **Archivist Dashboard:** View own uploads, stake status, countdown to release, publish, set/change the daily rental price, rental revenue
 - **Librarian Dashboard:** Review flagged uploads, challenge suspicious content on-chain, claim rewards
 
 ### What the Frontend Does NOT Do
@@ -63,6 +63,16 @@ This app handles:
     archivist signs → book Approved (rentable), stake returned, upload reward paid.
     Nothing approves it automatically: only the staker can call unstake()
 11. Challenged → see Challenge Flow
+
+=== AFTER APPROVAL: RENTAL PRICE (Archivist dashboard, PriceEditor) ===
+12. An Approved book is not rentable until it has a price. The archivist types a
+    daily price in $ALEX → rent.setBookPrice(arweaveHash, pricePerDayWei),
+    archivist signs. Rent.sol allows only the uploader, only on an Approved book,
+    any number of times; rentBook() charges price × days at the moment it runs,
+    so a change applies to new rentals only. Archivist gets 70% (payment.sol)
+13. Backend listener indexes BookPriceSet → Upload.pricePerDay (search, cards);
+    GET /api/rental/book/:hash reads the live price. Amounts stay atomic BigInt
+    end to end (utils/formatters.js parseAlexAmount / alexFromWei), never Number
 ```
 
 ### Rental Flow (Reader)
@@ -311,7 +321,8 @@ stake.challengeUpload(arweaveHash, reason)      // Librarian challenges
 stake.claimLibrarianRewards()                   // Librarian withdraws rewards
 
 // Rent.sol — Rental permissions
-rent.rentBook(arweaveHash, duration)            // Reader rents (pays $ALEX)
+rent.setBookPrice(arweaveHash, pricePerDayWei)  // Uploader, Approved books only; changeable
+rent.rentBook(arweaveHash, duration)            // Reader rents (pays price × days in $ALEX)
 rent.isRentalActive(arweaveHash, userAddress)   // Check active rental
 
 // payment.sol — Revenue (called indirectly via rentBook)
@@ -378,3 +389,45 @@ formData.append('walletAddress', address);
 - **AlexandriaSmartContract:** Frontend needs contract ABIs and deployed addresses. ABIs come from `npx hardhat compile` in that repo. Frontend calls contracts directly with the user's wallet for all on-chain transactions.
 - **Arweave:** Frontend fetches encrypted PDFs directly from `https://arweave.net/{arweaveHash}`. No backend involvement.
 - **Lit Protocol:** The decryption Lit Action lives here (`src/services/litAction.js`), but requests reach Lit through the backend relay (`POST /api/rental/unlock/:arweaveHash`), which holds the only key that can run it and rate-limits it. The Action checks the chain itself and answers with the key wrapped to the reader's session key, so the relay never sees a usable key. Every edit to the Action changes its CID: run `npm run test:lit-action`, re-pass the checklist in `AlexNode/KEY-BINDING.md`, `npm run lit:register`, then set `LIT_DECRYPT_ACTION_CID` in the backend.
+
+## V2: No Single Party Can Take a Book Down
+
+Alexandria is meant to be a library nobody can censor. The V1 contracts still let a
+few keys stop a book being rented or read. Delisting is the plainest case: one owner
+call, permanent, no reason given, no appeal. **V2 removes delisting.** The only way a
+book is refused stays the public one: a librarian's staked challenge inside the
+14-day window, reviewed by librarians and resolved on-chain (Challenge Flow above).
+
+**Until V2, build no UI for any lever below:** no Delist button, takedown page or
+admin blacklist screen. The deployed contracts can still pull them, so keep showing
+their effects correctly (a delisted book reads "can no longer be rented" in
+BookDetail.jsx and on the Archivist dashboard).
+
+### Levers in the V1 contracts (checked 2026-11-21)
+| Lever | Who can pull it | Effect |
+|---|---|---|
+| `Rent.delistBook(hash)` (Rent.sol:104) | Rent owner | No new rentals, ever. No reason stored, no undo. AlexNode search hides it (search.controller.js:100); paid rentals run out |
+| `library.updateUploadStatus(hash, status)` (library.sol:100) | Library owner **and every authorized caller, which includes the backend wallet** (deployment.md:173) | Any book to any status at any time, e.g. Approved → Rejected, which stops new rentals. Stronger than delisting, and held by a server hot key |
+| `Rent.blacklistAddress(renter)` (Rent.sol:95) | Rent owner | The wallet loses even rentals it already paid for: `isRentalActive` checks the blacklist (Rent.sol:58). Meant for leakers |
+| `library.blacklistUploader(addr)` (library.sol:57) | Library owner or authorized caller (backend wallet) | The wallet can never register an upload again |
+| `Rent.pause()` | Rent owner | `isRentalActive` is `whenNotPaused`, so it reverts and the Lit Action refuses every renter (litAction.js:141): nobody reads while paused |
+| AlexNode | Whoever runs the server | Search can leave a book out; the unlock relay holds the only key that runs the decryption Action, so it can refuse any unlock |
+
+### V2 changes
+1. Remove `delistBook`, the `delisted` mapping and `BookDelisted`. Then drop the
+   `delisted` column and search filter in AlexNode, and the delisted copy here.
+2. Only the stake contract may call `updateUploadStatus`: not the owner, not the
+   backend. Give the backend a role that can only `registerUpload`.
+3. Reading must not depend on pause: an emergency pause may stop new rentals, never
+   rentals already paid for (`isRentalActive` without `whenNotPaused`).
+4. Decide whether `blacklistAddress` and `blacklistUploader` stay at all. If they do:
+   who may use them (multisig or DAO), evidence on record, an appeal, and whether a
+   blacklisted renter keeps what they already paid for.
+5. Admin keys to a multisig or DAO (already planned: AlexandriaContract/CLAUDE.md, "Access").
+6. Off-chain: the AlexNode search index and unlock relay are single points of
+   control. Plan how readers find and unlock a book if that server refuses or disappears.
+
+Open question for the design: with no takedown in the protocol, a book found to be
+illegal after its 14-day window stays rentable. If moderation is ever needed, keep it
+in an interface (one frontend choosing not to list a book) while the contracts keep
+renting and serving it, so any other frontend still can.
