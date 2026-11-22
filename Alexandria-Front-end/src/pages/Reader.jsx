@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import * as pdfjsLib from 'pdfjs-dist'
-import { PDFDocument, rgb, StandardFonts, degrees } from 'pdf-lib'
 import { useWallet } from '../context/WalletContext'
 import WalletSelectModal from '../components/WalletSelectModal'
 import { getUpload, getDecryptParams, getEncryptedBook } from '../services/api'
 import { unlockBookKey } from '../services/lit'
 import { decryptPdfInBrowser, zeroMemory } from '../services/decryption'
 import { keyExpiry, loadBookKey, saveBookKey, forgetBookKey, forgetExpiredBookKeys } from '../services/keyStore'
+import { addWatermarks } from '../utils/watermark'
 import { MOCK_BOOKS } from '../data/mockBooks'
 import '../styles/Reader.css'
 
@@ -15,41 +15,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
   import.meta.url,
 ).toString()
-
-// ── Watermarking ──────────────────────────────────────────────────
-// One symmetric key protects a book for everyone who ever reads it, so if a
-// copy leaks, the only thing that says who leaked it is the page itself. A
-// librarian review copy is marked as such: it is a book nobody can rent yet, so
-// a leaked one is traceable to the handful of wallets that could open it.
-async function addWatermarks(pdfBytes, { walletAddress, rentalDate, expiryDate, grantedVia }) {
-  const doc      = await PDFDocument.load(pdfBytes)
-  const font     = await doc.embedFont(StandardFonts.Helvetica)
-  const boldFont = await doc.embedFont(StandardFonts.HelveticaBold)
-  const isReview = grantedVia === 'librarian_review'
-  const footer   = isReview
-    ? `LIBRARIAN REVIEW COPY — not for distribution | Librarian: ${walletAddress} | Opened: ${rentalDate}`
-    : grantedVia === 'uploader'
-      // The archivist's own book: access that never expires, so no expiry to print.
-      ? `ARCHIVIST COPY | Uploader: ${walletAddress} | Opened: ${rentalDate}`
-      : `Licensed to: ${walletAddress} | Rental: ${rentalDate} | Expires: ${expiryDate || 'unknown'}`
-
-  for (const page of doc.getPages()) {
-    const { width, height } = page.getSize()
-    // Footer strip
-    page.drawText(footer, { x: 10, y: 11, size: 6, font, color: rgb(0.45, 0.45, 0.45), opacity: 0.75 })
-    // Diagonal ghost watermark
-    page.drawText(
-      isReview ? `REVIEW COPY ${walletAddress.slice(0, 10)}…` : walletAddress.slice(0, 18) + '…',
-      {
-        x: width / 2 - 90, y: height / 2,
-        size: 16, font: boldFont,
-        color: rgb(0.65, 0.65, 0.65), opacity: 0.06,
-        rotate: degrees(40),
-      }
-    )
-  }
-  return doc.save()
-}
 
 // ── Load steps ────────────────────────────────────────────────────
 const STEPS = [
@@ -243,6 +208,8 @@ export default function Reader() {
         rentalDate: today,
         expiryDate: expiryMs ? new Date(expiryMs).toISOString().slice(0, 10) : null,
         grantedVia,
+        // The rental's BookRented transaction; null until the backend indexes it.
+        transactionHash: grantedVia === 'rental' ? decryptParams.rentalTxHash : null,
       })
       if (cancelled) return
       zeroMemory(decryptedPdfBytes) // zero unwatermarked buffer

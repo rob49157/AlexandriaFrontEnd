@@ -90,6 +90,10 @@ export async function getRenterRentals(address) {
  * Fetch decryption payload (sealed envelope, IV, authTag)
  * @param {string} arweaveHash
  * @param {string} address
+ * @returns {Promise<{ grantedVia: string, expiry: string|null, rentalTxHash: string|null,
+ *   litEncryptedKeyId: string, litDataToEncryptHash: string, encryptionIv: string, encryptionAuthTag: string }>}
+ *   rentalTxHash — the rental's BookRented transaction, for the watermark; null for
+ *   the other doors, and until the backend has indexed the rental
  */
 export async function getDecryptParams(arweaveHash, address) {
   return fetchJson(`/rental/decrypt-params/${encodeURIComponent(arweaveHash)}/${encodeURIComponent(address)}`);
